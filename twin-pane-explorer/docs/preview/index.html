@@ -1,0 +1,105 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Twin-Pane Explorer — پیش‌نمایش</title>
+<style>
+  body { background:#11151c; color:#d7dee8; font-family:ui-sans-serif,system-ui,sans-serif;
+          margin:0; padding:32px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  p.sub { color:#8b98a8; margin:0 0 28px; font-size:14px; }
+  section { margin-bottom:34px; }
+  h2 { font-size:15px; color:#9ecbff; margin:0 0 2px; }
+  .note { color:#8b98a8; font-size:12.5px; margin:0 0 8px; }
+  pre { background:#0b0f14; border:1px solid #1e2733; border-radius:8px;
+         padding:14px 16px; overflow-x:auto; font:13px/1.25 "JetBrains Mono",
+         "Cascadia Code", ui-monospace, monospace; color:#cfd8e3; }
+</style>
+<h1>Twin-Pane Explorer</h1>
+<p class="sub">Termux two-panel file manager - real screens captured from the running app</p>
+<section><h2>Two panels</h2><p class='note'>خانه‌ی Termux در چپ، حافظه‌ی گوشی /sdcard در راست</p><pre> Twin-Pane Explorer                                              Tab:switch  F1:help  F10:quit  
+┌─ /tmp/twinpane-preview-dl18zldg/home ───────┐┌─ /tmp/twinpane-preview-dl18zldg/sdcard ──────┐ 
+│ Name                     Size  Modified     ││ Name                      Size  Modified     │ 
+│ [Download]              &lt;DIR&gt;  Nov 22 10:37 ││ [DCIM]                   &lt;DIR&gt;  Nov 22 10:37 │ 
+│ [projects]              &lt;DIR&gt;  Nov 22 10:37 ││ [Download]               &lt;DIR&gt;  Nov 22 10:37 │ 
+│  .bashrc                  28B  Nov 22 10:37 ││  download.zip             4.1M  Nov 22 10:37 │ 
+│  backup.tar.gz           2.3M  Nov 22 10:37 ││                                              │ 
+│  notes.txt                18B  Nov 22 10:37 ││                                              │ 
+│  setup.sh                 10B  Nov 22 10:37 ││                                              │ 
+│                                             ││                                              │ 
+│                                             ││                                              │ 
+│                                             ││                                              │ 
+│                                             ││                                              │ 
+│                                             ││                                              │ 
+│                                             ││                                              │ 
+│                                             ││                                              │ 
+│                                             ││                                              │ 
+│drwxr-xr-x Download  (0 items)            N^ ││drwxr-xr-x DCIM  (1 items)                 N^ │ 
+└─────────────────────────────────────────────┘└──────────────────────────────────────────────┘ 
+                                                                                                
+Tab=switch  c/F5=copy  m/F6=move  F7=new  F8=delete  F10=quit   |   selected: 0                 
+1 Help  2 Refresh  3 View  4 Edit  5 Copy  6 Move  7 MkDir  8 Delete  9 Menu  10 Quit</pre></section>
+<section><h2>Selection</h2><p class='note'>انتخاب چند فایل با Space، سپس F5</p><pre> Twin-Pane Explorer                                              Tab:switch  F1:help  F10:quit  
+┌─ …p/twinpane-preview-dl18zldg/home ─── *2* ─┐┌─ /tmp/twinpane-preview-dl18zldg/sdcard ──────┐ 
+│ Name                     Size  Modified     ││ Name                      Size  Modified     │ 
+│ [Download]              &lt;DIR&gt;  Nov 22 10:37 ││ [DCIM]                   &lt;DIR&gt;  Nov 22 10:37 │ 
+│ [projects]              &lt;DIR&gt;  Nov 22 10:37 ││ [Download]               &lt;DIR&gt;  Nov 22 10:37 │ 
+│• .bashrc                  28B  Nov 22 10:37 ││  download.zip             4.1M  Nov 22 10:37 │ 
+│  backup.tar.gz           2.3M  Nov 22 10:37 ││                                              │ 
+│• notes.txt                18B  Nov 22 10:37 ││                                              │ 
+│  setup.sh                 10B  Nov 22 10:37 ││                                              │ 
+│                                             ││                                              │ 
+│                                             ││                                              │ 
+│                                             ││                                              │ 
+│                                             ││                                              │ 
+│                                             ││                                              │ 
+│                                             ││                                              │ 
+│                                             ││                                              │ 
+│                                             ││                                              │ 
+│-rwxr-xr-x setup.sh  10B                  N^ ││drwxr-xr-x DCIM  (1 items)                 N^ │ 
+└─────────────────────────────────────────────┘└──────────────────────────────────────────────┘ 
+                                                                                                
+Tab=switch  c/F5=copy  m/F6=move  F7=new  F8=delete  F10=quit   |   selected: 2                 
+1 Help  2 Refresh  3 View  4 Edit  5 Copy  6 Move  7 MkDir  8 Delete  9 Menu  10 Quit</pre></section>
+<section><h2>Copy confirm</h2><p class='note'>تاییدیه‌ی کپی با نمایش مبدأ و مقصد</p><pre> Twin-Pane Explorer                                              Tab:switch  F1:help  F10:quit  
+┌─ …p/twinpane-preview-dl18zldg/home ─── *2* ─┐┌─ /tmp/twinpane-preview-dl18zldg/sdcard ──────┐ 
+│ Name                     Size  Modified     ││ Name                      Size  Modified     │ 
+│ [Download]              &lt;DIR&gt;  Nov 22 10:37 ││ [DCIM]                   &lt;DIR&gt;  Nov 22 10:37 │ 
+│ [projects]              &lt;DIR&gt;  Nov 22 10:37 ││ [Download]               &lt;DIR&gt;  Nov 22 10:37 │ 
+│• .bashrc                  28B  Nov 22 10:37 ││  download.zip             4.1M  Nov 22 10:37 │ 
+│  backup┌─ Copy to other panel ──────────────────────────────────────────────────────┐       │ 
+│• notes.│ Copy 2 item(s)                                                             │       │ 
+│  setup.│                                                                            │       │ 
+│        │   /tmp/twinpane-preview-dl18zldg/home/.bashrc                              │       │ 
+│        │   /tmp/twinpane-preview-dl18zldg/home/notes.txt                            │       │ 
+│        │                                                                            │       │ 
+│        │ to: /tmp/twinpane-preview-dl18zldg/sdcard                                  │       │ 
+│        │                                                                            │       │ 
+│        │                               [Y]es    [n]o                                │       │ 
+│        └────────────────────────────────────────────────────────────────────────────┘       │ 
+│                                             ││                                              │ 
+│-rwxr-xr-x setup.sh  10B                  N^ ││drwxr-xr-x DCIM  (1 items)                 N^ │ 
+└─────────────────────────────────────────────┘└──────────────────────────────────────────────┘ 
+                                                                                                
+Tab=switch  c/F5=copy  m/F6=move  F7=new  F8=delete  F10=quit   |   selected: 2                 
+1 Help  2 Refresh  3 View  4 Edit  5 Copy  6 Move  7 MkDir  8 Delete  9 Menu  10 Quit</pre></section>
+<section><h2>Help</h2><p class='note'>راهنمای کلیدها با F1</p><pre>┌─ Help ──────────────────────────────────────────────────────────────────────────────────────┐ 
+│Twin-Pane Explorer - a two-panel file manager made for Termux/Android.                       │ 
+│                                                                                             │ 
+│MOVING AROUND                                                                                │ 
+│  Up / Down / PgUp / PgDn / Home / End     move the cursor                                   │ 
+│  Enter                                    open folder (or view file)                        │ 
+│  Backspace or ..                          go to parent folder                               │ 
+│  Tab, Left, Right                         switch active panel                               │ 
+│  /  or Ctrl+G                             go to any path (~ / $VARS work)                   │ 
+│  z  or f                                  filter this panel&#x27;s list (*.jpg)                  │ 
+│  a  or Ctrl+H                             show/hide hidden files                            │ 
+│  i                                        details of the item (perms, size...)              │ 
+│                                                                                             │ 
+│TRANSFERS                                                                                    │ 
+│  Space                    select current item and move down                                 │ 
+│  + / -                    select all / clear selection                                      │ 
+│  c or F5                  COPY selected -&gt; other panel                                      │ 
+│  m or F6                  MOVE selected -&gt; other panel                                      │ 
+│  F8 or Del                DELETE selected                                                   │ 
+│  F7                       new folder          r / Ctrl+R   rename                           │ 
+└1/35   Up/Down  PgUp/PgDn  Home/End   q/Esc close────────────────────────────────────────────┘ 
+1 Help  2 Refresh  3 View  4 Edit  5 Copy  6 Move  7 MkDir  8 Delete  9 Menu  10 Quit</pre></section>
