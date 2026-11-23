@@ -104,8 +104,22 @@ jobs:
 
       - name: Build debug APK
         run: |
+          set -o pipefail
           cd android
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          # Pipe through tee so javac diagnostics also land in a file we can
+          # re-emit as a workflow annotation (log downloads are not always
+          # reachable from a phone or a restricted network).
+          if ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/build.log; then
+            exit 0
+          fi
+          echo "--- javac diagnostics ---"
+          grep -E "error:|warning:" /tmp/build.log | head -40 || true
+          if grep -oE "error: .*" /tmp/build.log | head -20 | sed 's/%/%25/g; s/\r/%0D/g; s/\n/%0A/g' > /tmp/errs.txt; then
+            while IFS= read -r line; do
+              [ -n "$line" ] && echo "::error title=javac::$line"
+            done < /tmp/errs.txt
+          fi
+          exit 1
 
       - name: Build release APK (unsigned if no keystore)
         run: |
