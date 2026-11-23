@@ -44,7 +44,6 @@ jobs:
 
       - name: Unit tests (POSIX-only cases skipped)
         shell: pwsh
-        continue-on-error: true
         id: tests
         run: |
           # The full report goes to an artifact: job logs cannot be fetched
@@ -52,7 +51,11 @@ jobs:
           python -m pytest -q -rf --tb=short -m "not needs_pty" `
             tests/test_fsops.py tests/test_archive.py tests/test_core_phase3.py *>&1 |
             Tee-Object -FilePath "$env:RUNNER_TEMP\pytest-win.txt"
-          exit $LASTEXITCODE
+          # In a pipeline $LASTEXITCODE is the exit code of the *last* command
+          # (Tee-Object), which is always 0 - so capture it from the file instead.
+          $failed = Select-String -Path "$env:RUNNER_TEMP\pytest-win.txt" `
+            -Pattern "failed|error" -Quiet
+          if ($failed) { exit 1 } else { exit 0 }
 
       - name: Publish the pytest report
         if: always()
@@ -61,13 +64,6 @@ jobs:
           name: windows-pytest-report
           path: ${{ runner.temp }}/pytest-win.txt
           if-no-files-found: warn
-
-      - name: Fail the job if the tests failed
-        if: steps.tests.outcome == 'failure'
-        shell: pwsh
-        run: |
-          Write-Host "::error::unit tests failed - see the windows-pytest-report artifact"
-          exit 1
 
       - name: Smoke - does curses import and init under Windows?
         shell: pwsh
