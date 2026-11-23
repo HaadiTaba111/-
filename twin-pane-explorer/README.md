@@ -21,7 +21,10 @@ Tab=switch  c/F5=copy  m/F6=move  F7=new  F8=delete  F10=quit   |   selected: 2
 1 Help  2 Refresh  3 View  4 Edit  5 Copy  6 Move  7 MkDir  8 Delete  9 Menu  10 Quit
 ```
 
-> پیش‌نمایش زنده (اسکرین‌شات‌های استخراج‌شده از خود برنامه): `docs/preview/index.html`
+> پیش‌نمایش زنده (اسکرین‌شات‌های **رنگی** استخراج‌شده از خود برنامه): `docs/preview/index.html`
+
+**تازه در ۱.۱** — لاگ روزانه، ادامه از همان‌جایی که بودید، ۱۰ تم قابل‌تغییر، معماری
+پارامتری + پلاگین، پکیج واقعی Termux (`.deb`) و مسیر ساخت `.exe` ویندوز.
 
 ## چرا این؟
 
@@ -48,7 +51,15 @@ Tab=switch  c/F5=copy  m/F6=move  F7=new  F8=delete  F10=quit   |   selected: 2
 pkg install python termux-tools      # اگر نصب نیست
 termux-setup-storage                 # یک بار، برای دسترسی به /sdcard (Allow بزنید)
 cd twin-pane-explorer && bash install-termux.sh
+
+# یا نصب از پکیج آماده (بدون کپی سورس):
+python build_dist.py                 # dist/twinpane_1.1.0_all.deb می‌سازد
+pkg install ./dist/twinpane_1.1.0_all.deb
 ```
+
+`install-termux.sh` خودش python و ncurses را نصب می‌کند، کلیدهای اضافه‌ی Termux را
+اضافه می‌کند و در پایان یک **self-test** (ساخت zip و استخراج) می‌گیرد.
+برای حذف: `bash install-termux.sh --uninstall`.
 
 سپس:
 
@@ -96,9 +107,12 @@ python3 twinpane.py -l . -r /tmp
 | `/` یا `Ctrl+G` | رفتن به مسیر (`~` و `$VARS` هم کار می‌کند) |
 | `F2` | بازخوانی |
 | `F3` یا `v` | نمایش فایل متنی |
-| `F4` | ویرایش `~/.twinpanerc` |
-| `F9` | منو (شامل تعویض چیدمان) |
-| `F10` یا `q` | خروج |
+| `F4` | ویرایش `config.json` در ادیتور |
+| `F9` | منو (شامل Settings و Log و دستورهای پلاگین) |
+| **`t`** | **تم بعدی** (۱۰ تم آماده، فوری عوض می‌شود) |
+| **`S`** | **تنظیمات** — هر ۲۹ پارامتر از روی schema |
+| **`G`** | **لاگ روزانه** (چه کارهایی امروز انجام شده) |
+| `F10` یا `q` | خروج (و ذخیره‌ی نشست) |
 | `Esc` | لغو انتقال در حال اجرا / پاک‌کردن انتخاب |
 
 ## نکته‌های اندروید
@@ -114,20 +128,28 @@ python3 twinpane.py -l . -r /tmp
 ```
 twin-pane-explorer/
 ├── twinpane/
-│   ├── fsops.py      # عملیات فایل خالص (بدون curses) - تست‌پذیر
-│   └── ui.py         # رابط curses دو-پنلی، دیالوگ‌ها، پروگرس‌بار
-├── twinpane.py       # لانچر ساده  (python3 twinpane.py)
-├── run.py            # همان کار برای اجرای مستقیم از این پوشه
-├── install-termux.sh # نصب در Termux + self-test
-├── termux-widget.sh  # شورتکات صفحه‌ی خانه
-├── tests/            # 22 تست عملیات فایل + 10 تست رابط با pty واقعی
-└── docs/             # راهنماها
+│   ├── fsops.py        # عملیات فایل خالص (بدون curses) - تست‌پذیر
+│   ├── ui.py           # رابط curses دو-پنلی، دیالوگ‌ها، پروگرس‌بار
+│   ├── config.py       # schema پارامترها + Config (JSON اتمیک) + CLI
+│   ├── themes.py       # ۱۰ تم، نقش‌های رنگ، قاب‌ها، تم سفارشی از JSON
+│   ├── logging_setup.py# لاگ روزانه‌ی فعالیت + لاگ خطا با traceback
+│   ├── session.py      # ذخیره/بازیابی نشست (پوشه، کرسر، سورت، چیدمان)
+│   └── plugins.py      # API قلاب/دستور/تنظیم برای افزونه‌ها
+├── twinpane.py         # لانچر ساده  (python3 twinpane.py)
+├── run.py              # همان کار برای اجرای مستقیم از این پوشه
+├── install-termux.sh   # نصب در Termux + self-test
+├── build_dist.py       # ساخت .deb + .zip در dist/
+├── build-exe.bat       # ساخت TwinPane.exe روی ویندوز
+├── TwinPane.bat        # لانچر ویندوز
+├── termux-widget.sh    # شورتکات صفحه‌ی خانه
+├── tests/              # ۱۳۱ تست (fsops، آرشیو، UI با pty، ماوس، هسته)
+└── docs/               # راهنماها  (+ docs/preview/index.html)
 ```
 
 ## تست‌ها
 
 ```bash
-python3 -m pytest tests/ -q      # ۳۲ تست
+python3 -m pytest tests/ -q      # ۱۳۱ تست
 # تست‌های UI به pexpect و pyte نیاز دارند:  pip install pexpect pyte
 ```
 
@@ -214,6 +236,169 @@ extra-keys = [ \
 
 بعد `termux-reload-settings` را اجرا کنید. این کار کلیدهای F5/F6/F10 و جهت‌دار را
 در دسترس می‌گذارد؛ البته برنامه بدون آن‌ها هم با `c`/`m`/`u`/`Z`/`Q` کار می‌کند.
+
+## لاگ روزانه — «امروز چه کار کردم؟»
+
+هر روز یک فایل جدا نوشته می‌شود و **هر اقدام** با ساعت، هدف و جزئیات ثبت می‌شود:
+
+```bash
+ls ~/.local/state/twinpane/logs/
+#   activity-2026-11-23.log    errors-2026-11-23.log
+```
+
+```
+2026-11-23 06:58:00 INFO  --- session start ---  version=1.1.0 left=~ right=/sdcard theme=gruvbox
+2026-11-23 06:58:01 INFO  cd             /sdcard/DCIM  from_=/sdcard
+2026-11-23 06:58:04 INFO  copy           /sdcard/DCIM/photo.jpg  dest=~  files=1 bytes=890000 seconds=0.12
+2026-11-23 06:58:09 INFO  archive        ~/photos.zip  sources=1 files=1 bytes=890000
+2026-11-23 06:58:12 INFO  setting        ui.theme  value=midnight
+2026-11-23 06:58:20 INFO  --- session end ---  reason=quit
+```
+
+- داخل برنامه: کلید **`G`** یا `F9 → Activity log` — فقط tail فایل نمایش داده می‌شود.
+- فایل **`errors-…log`** جداست و **traceback کامل** دارد؛ یک باگ را می‌شود مستقیم فرستاد
+  یا خودم بخوانم بدون اینکه لاگ روزمره شلوغ شود.
+- هر لاگ روز حداکثر **۲ مگابایت**، پس گوشی هیچ‌وقت پر نمی‌شود؛ فایل‌های قدیمی‌تر از
+  `logging.keep_days` (پیش‌فرض ۱۴ روز) خودکار پاک می‌شوند.
+- هیچ‌وقت برنامه را از کار نمی‌اندازد: اگر پوشه‌ی لاگ قابل نوشتن نبود، لاگ خاموش
+  می‌شود و برنامه ادامه می‌دهد (در Settings علتش را نشان می‌دهد).
+- `logging.level = debug` تکتک کلیدها را هم ثبت می‌کند (برای پیدا کردن باگ).
+
+## ادامه از همان‌جا (Resume)
+
+برنامه هنگام خروج، و همچنین **با هر بار عوض کردن پوشه**، وضعیت را در
+`~/.local/state/twinpane/session.json` ذخیره می‌کند:
+
+```json
+{ "active": 0, "layout": "auto",
+  "left":  {"path": "/storage/emulated/0/DCIM", "cursor": "photo.jpg", "sort": "size", "reverse": true},
+  "right": {"path": "/data/data/com.termux/files/home", "cursor": "notes.txt"} }
+```
+
+دفعه‌ی بعد که `twinpane` را باز کنید، **همان پوشه‌ها، همان کرسر، همان ترتیب مرتب‌سازی
+و همان پنل فعال** برمی‌گردند و بالای صفحه `Resumed your last session` می‌بینید.
+
+اولویت انتخاب پوشه‌ی شروع: **آرگومان خط فرمان (`-l`/`-r`) > نشست > `startup.left/right` > پیش‌فرض هوشمند.**
+یعنی اگر صریح مسیر بدهید، حرف شما مقدم است. برای خاموش‌کردن:
+
+```bash
+python -m twinpane.config --set behaviour.restore_session=off
+```
+یا `S` → `behaviour.restore_session` → off.
+
+## تم و ظاهر دلخواه
+
+**`t`** = تم بعدی، **`S`** = صفحه‌ی تنظیمات (Enter = تغییر، Esc = برگشت).
+
+| تم | حس و حال |
+|---|---|
+| `classic` | آبی/سفید کلاسیک NC — پیش‌فرض |
+| `midnight` | سرمه‌ای تیره، مناسب شب |
+| `amber` | کهربایی روی مشکی، شبیه ترمینال‌های قدیمی |
+| `forest` | سبز جنگلی |
+| `mono` | سیاه‌وسفید، بی‌رنگ (برای کنسول‌های ساده) |
+| `solarized` | خنثی و کم‌خسته‌کننده |
+| `paper` | روشن، برای زیر آفتاب |
+| `dracula` | بنفش/صورتی |
+| `nord` | یخی/آبی |
+| `gruvbox` | خاکی و گرم |
+
+علاوه بر رنگ، **قاب‌ها** هم عوض می‌شوند: `auto` (یونیکد اگر UTF-8 باشد)، `unicode`،
+`double` (╔═╗)، `rounded` (╭─╮)، `ascii` (+-+ برای فونت‌های شکسته) و `none`.
+`ui.density = compact` سرستون‌ها و فوتر پنل را حذف می‌کند تا در ۲۰ خط هم چیز بیشتری جا شود.
+
+**تم سفارشی** — یک فایل JSON در `~/.config/twinpane/themes/` بگذارید؛ خودکار بارگذاری می‌شود:
+
+```json
+{ "name": "neon",
+  "roles": { "panel": ["#e0e0ff", "#101020"],
+             "current": ["black", "magenta"],
+             "title": ["#00ffcc", "#101020", ["bold"]] } }
+```
+
+نقش‌ها: `panel`, `panel_border`, `panel_dim`, `current`, `title`, `dialog`, `input`,
+`bar`, `title_screen`, `ok`, `error`, `warning`, `dim`, `link`, `header`, `status_bar`,
+`selected_mark`. هر نقشی که ندهید از `classic` ارث می‌برد. رنگ‌ها را می‌شود نام
+(`red`)، شماره‌ی ۲۵۶ رنگی (`208`)، هگز (`#ff8700`) یا `-1` نوشت.
+
+## سیستم پارامتری و ماژولار
+
+کل برنامه یک **schema** دارد: هر رفتار یک `Param` است با نوع، مقدار پیش‌فرض، گزینه‌ها،
+راهنما و بخش. صفحه‌ی تنظیمات از همین schema ساخته می‌شود — یعنی **افزودن یک تنظیم
+جدید، کد UI نمی‌خواهد**، فقط یک خط:
+
+```python
+_p("ui.compact_title", False, "bool", None, "Shorten path titles", "appearance")
+```
+
+فایل تنظیمات: `~/.config/twinpane/config.json` (روی ویندوز `%APPDATA%\twinpane\`).
+مسیرها با `TWINPANE_CONFIG_DIR` / `TWINPANE_STATE_DIR` قابل تغییرند.
+
+```bash
+python -m twinpane.config --schema          # همه‌ی پارامترها
+python -m twinpane.config --json            # مقادیر فعلی
+python -m twinpane.config --set ui.theme=nord logging.level=debug
+python -m twinpane.config --reset           # برگشت به پیش‌فرض
+python -m twinpane.config --path            # فایل کجاست
+```
+
+**پلاگین** — یک فایل پایتون در `~/.config/twinpane/plugins/`. قلاب‌ها، دستورها و
+تنظیمات خودش را اضافه می‌کند و در `F9` ظاهر می‌شود:
+
+```python
+# ~/.config/twinpane/plugins/upload.py
+def register(api):
+    @api.hook("copy")                     # startup quit navigate copy move delete
+    def after_copy(sources, dest, result): # archive extract key theme_change config_change
+        api.log.action("upload", dest, files=result.files)
+
+    api.command("Sync to Nextcloud", lambda app: app.info("todo"))
+```
+
+یک پلاگین خراب **هرگز** برنامه را زمین نمی‌زند: خطا در `errors-*.log` ثبت و رد می‌شود.
+
+## پکیج اندروید و ویندوز
+
+### Termux (روش واقعی روی گوشی)
+
+```bash
+python build_dist.py                 # dist/twinpane_1.1.0_all.deb + zip + SHA256SUMS
+pkg install ./dist/twinpane_1.1.0_all.deb
+twinpane
+```
+
+`.deb` یک **پکیج بومی Termux** است (نه APK): بدون روت، بدون Android SDK، با
+`Depends: python, ncurses-utils`، خودش را روی `$PREFIX/bin` نصب می‌کند و با
+`pkg uninstall twinpane` کامل پاک می‌شود.
+
+### چرا APK نه؟
+
+APK یک بسته‌ی امضاشده‌ی اندروید است و برای ساختنش SDK + build-tools (aapt2, d8,
+apksigner) و JDK لازم است — هیچ‌کدام در این محیط نیستند (نه اینترنت apt، نه SDK).
+مهم‌تر: یک برنامه‌ی **curses** بدون شبیه‌ساز ترمینال اصلاً داخل اپ اندرویدی اجرا
+نمی‌شود؛ برای همین مسیر درستِ یک TUI، پکیج بومی Termux است. اگر واقعاً آیکون و
+لانچر جدا می‌خواهید، فایل `.github/workflows/build-apk-tui.yml` و توضیحش را ببینید.
+
+### ویندوز — `TwinPane.exe`
+
+کد از اول برای ویندوز نوشته شده (بدون `pwd`/`termios` اجباری؛ `windows-curses`).
+ساخت `.exe` ممکن است ولی **PyInstaller روی لینوکس نمی‌تواند exe بسازد** — باید روی
+ویندوز اجرا شود. دو راه آماده است:
+
+```bat
+:: روی ویندوز، کنار پوشه‌ی پروژه
+build-exe.bat              :: یا  build-exe.bat --test
+dist\TwinPane.exe
+```
+
+یا بدون ویندوز: تگ بزنید تا GitHub Actions روی `windows-latest` بسازد و به Release
+بچسباند —
+
+```bash
+git tag v1.1.0 && git push origin v1.1.0
+```
+
+خروجی: `TwinPane.exe` + `TwinPane-windows.zip` در تب Actions/Releases.
 
 ## رفع اشکال
 

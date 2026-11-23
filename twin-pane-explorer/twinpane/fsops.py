@@ -20,11 +20,17 @@ from __future__ import annotations
 import errno
 import fnmatch
 import os
-import pwd
 import re
 import shutil
 import stat as stat_mod
 import time
+
+try:                      # POSIX only; Windows has no uid/gid database
+    import pwd as _pwd
+    import grp as _grp
+except ImportError:       # pragma: no cover - exercised on Windows
+    _pwd = None
+    _grp = None
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -73,12 +79,24 @@ def human_size(n: int) -> str:
     return "%.1f%s" % (value, _UNITS[idx])
 
 
+DATE_FORMAT = "auto"   # auto | iso | short  (set from config)
+
+
 def format_time(ts: float) -> str:
-    """Compact date: 'Nov 22 10:12' for this year, '2021-04-02' otherwise."""
+    """Compact date, format chosen by the ``ui.date_format`` setting.
+
+    * auto  -> 'Nov 22 10:12' this year, '2021-04-02' otherwise
+    * iso   -> always '2021-04-02'
+    * short -> always 'Nov 22 10:12'
+    """
     if not ts:
         return ""
     try:
         lt = time.localtime(ts)
+        if DATE_FORMAT == "iso":
+            return time.strftime("%Y-%m-%d", lt)
+        if DATE_FORMAT == "short":
+            return time.strftime("%b %d %H:%M", lt)
         now = time.localtime()
         if lt.tm_year == now.tm_year:
             return time.strftime("%b %d %H:%M", lt)
@@ -129,18 +147,20 @@ def mode_string(mode: int) -> str:
 
 
 def owner_name(uid: int) -> str:
+    if _pwd is None:
+        return str(uid)
     try:
-        return pwd.getpwuid(uid).pw_name
+        return _pwd.getpwuid(uid).pw_name
     except (KeyError, OSError):
         return str(uid)
 
 
 def group_name(gid: int) -> str:
+    if _grp is None:
+        return str(gid)
     try:
-        import grp
-
-        return grp.getgrgid(gid).gr_name
-    except (KeyError, OSError, ImportError):
+        return _grp.getgrgid(gid).gr_name
+    except (KeyError, OSError):
         return str(gid)
 
 
@@ -225,7 +245,7 @@ def list_dir(path: str, show_hidden: bool = True,
             entries.append(Entry(
                 name=name, path=de.path, is_dir=is_dir,
                 size=size, mtime=st.st_mtime, mode=st.st_mode,
-                uid=st.st_uid, gid=st.st_gid,
+                uid=getattr(st, "st_uid", 0), gid=getattr(st, "st_gid", 0),
                 is_link=is_link, link_broken=broken,
             ))
     return entries, errors

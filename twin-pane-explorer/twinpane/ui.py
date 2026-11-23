@@ -26,7 +26,12 @@ import subprocess
 import sys
 import time
 
+from . import config as config_mod
 from . import fsops
+from . import logging_setup
+from . import plugins
+from . import session as session_mod
+from . import themes as theme_mod
 from .fsops import Entry
 
 APP_TITLE = "Twin-Pane Explorer"
@@ -38,6 +43,7 @@ MIN_H, MIN_W = 10, 34
 # ---------------------------------------------------------------------------
 
 ASCII_MODE = False
+BORDER_SPEC = None          # dict from themes.border(); set by App
 
 _EASCII = str.maketrans({
     "\u2500": "-", "\u2502": "|", "\u250c": "+", "\u2510": "+",
@@ -65,13 +71,17 @@ def safe_addstr(win, y: int, x: int, text: str, attr: int = 0) -> None:
     room = maxx - x
     if room <= 0:
         return
+    # The very last cell of the *bottom* row cannot be written: curses would
+    # have to scroll the window.  Clip one column short so the rest of the
+    # line still lands instead of the whole string failing silently.
+    if y == maxy - 1:
+        room = min(room, maxx - x - 1)
+        if room <= 0:
+            return
     try:
         win.addstr(y, x, text[:room], attr)
     except curses.error:
-        try:
-            win.insstr(y, x, text[:room], attr)
-        except curses.error:
-            pass
+        pass
 
 
 def clip(text: str, width: int) -> str:
@@ -106,16 +116,25 @@ def draw_box(win, attr: int) -> None:
     h, w = win.getmaxyx()
     if h < 2 or w < 2:
         return
-    if ASCII_MODE:
-        horiz, vert, tl, tr, bl, br = "=", "|", "+", "+", "+", "+"
-    else:
-        horiz, vert, tl, tr, bl, br = "\u2500", "\u2502", "\u250c", "\u2510", "\u2514", "\u2518"
+    spec = BORDER_SPEC or theme_mod.border("unicode" if not ASCII_MODE else "ascii")
+    horiz, vert = spec["h"], spec["v"]
+    tl, tr, bl, br = spec["tl"], spec["tr"], spec["bl"], spec["br"]
     try:
         win.attrset(attr)
     except curses.error:
         pass
-    safe_addstr(win, 0, 0, tl + horiz * max(0, w - 2) + tr, attr)
-    safe_addstr(win, h - 1, 0, bl + horiz * max(0, w - 2) + br, attr)
+    # The bottom-right cell of a curses window cannot be written directly
+    # (writing it would scroll), so the corner glyphs are placed individually
+    # instead of a single full-width string.
+    safe_addstr(win, 0, 0, tl, attr)
+    inner = max(0, w - 2)
+    if inner:
+        safe_addstr(win, 0, 1, horiz * inner, attr)
+        safe_addstr(win, h - 1, 1, horiz * inner, attr)
+    safe_addstr(win, 0, w - 1, tr, attr)
+    safe_addstr(win, h - 1, 0, bl, attr)
+    if h - 1 > 0:
+        safe_addstr(win, h - 1, w - 1, br, attr)
     for y in range(1, h - 1):
         safe_addstr(win, y, 0, vert, attr)
         safe_addstr(win, y, w - 1, vert, attr)
@@ -126,57 +145,54 @@ def draw_box(win, attr: int) -> None:
 # ---------------------------------------------------------------------------
 
 class Colors:
-    def __init__(self, use_color: bool):
-        self.colors_on = use_color
-        if not use_color:
-            self.panel = curses.A_NORMAL
-            self.panel_border = curses.A_NORMAL
-            self.current = curses.A_REVERSE
-            self.title = curses.A_REVERSE
-            self.dialog = curses.A_NORMAL
-            self.dialog_input = curses.A_REVERSE
-            self.func_bar = curses.A_REVERSE
-            self.progress = curses.A_REVERSE
-            self.hotkey = curses.A_BOLD
-            self.warning = curses.A_REVERSE | curses.A_BOLD
-            self.dim = curses.A_DIM
-            self.link = curses.A_UNDERLINE
-            self.header = curses.A_UNDERLINE
-            self.status_bar = curses.A_DIM
-            self.selected_mark = curses.A_BOLD
-            return
-        pairs = {
-            "panel": (curses.COLOR_WHITE, curses.COLOR_BLUE),
-            "current": (curses.COLOR_BLACK, curses.COLOR_CYAN),
-            "title": (curses.COLOR_BLACK, curses.COLOR_CYAN),
-            "dialog": (curses.COLOR_BLACK, curses.COLOR_WHITE),
-            "input": (curses.COLOR_WHITE, curses.COLOR_BLUE),
-            "bar": (curses.COLOR_BLACK, curses.COLOR_WHITE),
-        }
-        ids = {}
-        for num, (name, (fg, bg)) in enumerate(pairs.items(), start=1):
-            ids[name] = num
-            try:
-                curses.init_pair(num, fg, bg)
-            except curses.error:
-                ids[name] = 0
-        def cp(name):
-            return curses.color_pair(ids[name]) if ids[name] else curses.A_NORMAL
-        self.panel = cp("panel")
-        self.panel_border = cp("panel") | curses.A_BOLD
-        self.current = cp("current")
-        self.title = cp("title") | curses.A_BOLD
-        self.dialog = cp("dialog")
-        self.dialog_input = cp("input")
-        self.func_bar = cp("bar")
-        self.progress = cp("panel") | curses.A_BOLD
-        self.hotkey = curses.A_BOLD
-        self.warning = curses.A_REVERSE | curses.A_BOLD
-        self.dim = curses.A_DIM
-        self.link = curses.A_UNDERLINE
-        self.header = curses.A_UNDERLINE
-        self.status_bar = curses.A_DIM
-        self.selected_mark = curses.A_BOLD
+    """Translate a theme (see twinpane/themes.py) into curses attributes.
+
+    Every attribute is looked up by *role*, so switching the theme at runtime
+    is just constructing a new Colors and repainting - no branch anywhere in
+    the drawing code needs to know about specific colours.
+    """
+
+    def __init__(self, use_color: bool, theme_name: str = "classic",
+                 color_pairs: bool = True):
+        from . import themes as theme_mod
+        self.theme_name = theme_name or theme_mod.FALLBACK
+        self.theme = theme_mod.load_theme(self.theme_name)
+        self.colors_on = bool(use_color)
+        self._pairs = {}
+        if self.colors_on:
+            num = 0
+            for role, (fg, bg, _attrs) in self.theme.items():
+                num += 1
+                if num > curses.COLOR_PAIRS - 1:
+                    break  # tiny terminals: reuse the last pair
+                fg_val = theme_mod.color_value(fg)
+                bg_val = theme_mod.color_value(bg)
+                try:
+                    curses.init_pair(num, fg_val, bg_val)
+                    self._pairs[role] = num
+                except curses.error:
+                    self._pairs[role] = 0
+        # materialise one attribute per role
+        for role in theme_mod.ROLES:
+            spec = self.theme.get(role) or self.theme.get("panel") or ("default", "default", ())
+            attrs = theme_mod.attr_value(spec[2])
+            pair = self._pairs.get(role) if self.colors_on else None
+            if pair:
+                value = curses.color_pair(pair) | attrs
+            elif self.colors_on:
+                value = attrs
+            else:
+                # no colour support at all: keep the theme's *structural* hints
+                value = (curses.A_REVERSE if "reverse" in (spec[2] or ()) else attrs)
+            setattr(self, role, value)
+        # aliases used by the rest of the UI
+        self.input = getattr(self, "dialog_input", curses.A_NORMAL)
+        self.bar = getattr(self, "func_bar", curses.A_REVERSE)
+        self.title_screen = getattr(self, "menu_bar", self.title)
+
+    def set_theme(self, name: str) -> None:
+        """Re-register pairs for another theme (requires a full repaint)."""
+        self.__init__(self.colors_on, name)
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +200,8 @@ class Colors:
 # ---------------------------------------------------------------------------
 
 class Panel:
+    SELECTED_MARKER = "\u2022"
+
     def __init__(self, path: str = "~"):
         self.path = fsops.path_expand(path, os.getcwd())
         self.entries: list = []
@@ -370,7 +388,7 @@ class Panel:
                 label = "[" + entry.name + "]"
             else:
                 label = " " + entry.name
-            lead = "\u2022" if entry.name in self.selected else " "
+            lead = self.SELECTED_MARKER if entry.name in self.selected else " "
             line = "%s%-*s" % (lead, name_w, clip(T(label), name_w))
             if not compact:
                 size_text = "<DIR>" if entry.is_dir else (
@@ -421,6 +439,10 @@ class Dialog:
         maxy, maxx = self.app.stdscr.getmaxyx()
         height = max(3, min(height, maxy - 1))
         width = max(min_width, min(width, maxx - 2))
+        if width >= maxx - 2:
+            # a dialog that is nearly full width snaps to both edges, otherwise
+            # a one-column sliver of the panel frame stays visible behind it
+            width = maxx
         y = max(0, (maxy - height) // 2)
         x = max(0, (maxx - width) // 2)
         win = curses.newwin(height, width, y, x)
@@ -785,7 +807,8 @@ MOVING AROUND
   i                                        details of the item (perms, size...)
 
 LAYOUT
-  L or F9 -> Switch layout                 auto: side-by-side on a wide
+  L or F9 -> Switch layout
+  t      -> Next theme (10 built in)      S -> Settings      G -> Activity log                 auto: side-by-side on a wide
                                            terminal, stacked on a phone
   --layout split      two columns          --layout stack    one panel
   On a narrow screen the active panel fills the width and the line above
@@ -812,7 +835,8 @@ ZIP / UNZIP  (no extra packages needed)
 OTHER
   Q or F1       quick menu (every command, one list) / help
   v or F3       view file              F2   refresh both panels
-  F4            edit ~/.twinpanerc
+  F4            edit config.json (then reload)
+  t             next theme          S   settings        G   activity log
   F10 or q      quit                   Ctrl+L  redraw screen
 
 TIPS FOR ANDROID
@@ -971,6 +995,15 @@ class App:
     def __init__(self, stdscr, args):
         self.stdscr = stdscr
         self.args = args
+        # ---- configuration, logging and session (all optional) ----------
+        self.cfg = config_mod.get_config()
+        self.log = self._build_log()
+        # any *uncaught* exception from here on lands in errors-YYYY-MM-DD.log
+        # with a full traceback, then the normal handler still runs
+        logging_setup.install_crash_hook(self.log)
+        self.state_dir = config_mod.state_dir()
+        self.session = session_mod.Session(self.state_dir)
+        self.registry = plugins.get_registry(self.log)
         self.transfer = None
         self.msg = ""
         self.msg_kind = "info"
@@ -1001,28 +1034,52 @@ class App:
         except (curses.error, AttributeError):
             pass
         self._enable_mouse_reporting()
-        if args.color == "never":
-            use_color = False
+        if args.color == "never" or not self.cfg.get("ui.theme"):
+            use_color = False if args.color == "never" else bool(curses.has_colors())
         else:
             use_color = bool(curses.has_colors())
-            if use_color:
+        if use_color:
+            try:
+                curses.start_color()
                 try:
-                    curses.start_color()
-                    try:
-                        curses.use_default_colors()
-                    except curses.error:
-                        pass
+                    curses.use_default_colors()
                 except curses.error:
-                    use_color = False
-        self.cs = Colors(use_color)
+                    pass
+            except curses.error:
+                use_color = False
         global ASCII_MODE
         want_ascii = bool(args.ascii or os.environ.get("TWINPANE_ASCII"))
         enc = (getattr(sys.stdout, "encoding", "") or "").lower()
         utf8 = "utf" in enc
         ASCII_MODE = want_ascii or not utf8
-        left = args.left or "~"
+        self.utf8 = utf8
+        self.border_style = theme_mod.resolve_border(self.cfg.get("ui.border"), utf8)
+        self.border_chars = theme_mod.border(self.border_style)
+        global BORDER_SPEC
+        BORDER_SPEC = self.border_chars
+        # custom user themes shipped in the config folder
+        self._load_user_themes()
+        theme_name = self.cfg.get("ui.theme")
+        if theme_name not in theme_mod.THEMES:
+            theme_name = theme_mod.FALLBACK
+        self.cs = Colors(use_color, theme_name)
+        # ---- starting folders: CLI > session > config > smart default ----
+        # A folder given on the command line is an explicit order: it wins, and
+        # only the panels that were *not* overridden get their cursor restored.
+        restore = bool(self.cfg.get("behaviour.restore_session"))
+        session_left = self.session.folder(0) if restore else None
+        session_right = self.session.folder(1) if restore else None
+        self._restore_flags = [False, False]
+        left = args.left or session_left or self.cfg.get("startup.left") or "~"
+        if not args.left and session_left:
+            self._restore_flags[0] = True
         if args.right:
             right = args.right
+        elif session_right:
+            right = session_right
+            self._restore_flags[1] = True
+        elif self.cfg.get("startup.right"):
+            right = self.cfg.get("startup.right")
         elif os.path.isdir("/sdcard"):
             right = "/sdcard"
         elif os.path.isdir(os.path.expanduser("~/storage/shared")):
@@ -1030,14 +1087,78 @@ class App:
         else:
             right = os.getcwd()
         self.panels = [Panel(left), Panel(right)]
-        self._mode_override = args.layout
-        self.active = 0
+        self._mode_override = args.layout if args.layout != "auto" else (
+            self.session.layout() or self.cfg.get("ui.layout") or "auto")
+        self.active = self.session.active() if restore else 0
+        self.active = 0 if self.active == 0 else 1
         self.dialog = Dialog(self)
-        for panel in self.panels:
+        self.resumed = False
+        # ---- apply configured per-panel defaults + restore cursors -------
+        for idx, panel in enumerate(self.panels):
+            panel.show_hidden = bool(self.cfg.get("ui.show_hidden"))
+            panel.sort_key = self.cfg.get("ui.sort_key")
+            panel.sort_reverse = bool(self.cfg.get("ui.sort_reverse"))
+            restore_this = self._restore_flags[idx]
+            saved_sort = self.session.sort(idx) if restore_this else None
+            if saved_sort:
+                panel.sort_key, panel.sort_reverse = saved_sort
             panel.refresh(keep_cursor=False)
-        if not args.quiet:
-            self.info("F5 copy  F6 move  F8 delete  F1 help   |   right panel: %s"
-                      % right)
+            cursor = self.session.cursor(idx) if restore_this else ""
+            if cursor:
+                for pos, entry in enumerate(panel.entries):
+                    if entry.name == cursor:
+                        panel.index = pos
+                        panel.cursor_name = cursor
+                        break
+        # ---- load plugins (after config, before the first frame) ---------
+        self.registry.load_directory(os.path.join(config_mod.config_dir(), "plugins"))
+        self.log.session_start(
+            version=__import__("twinpane").__version__,
+            left=self.panels[0].path, right=self.panels[1].path,
+            layout=self._mode_override, theme=self.cfg.get("ui.theme"),
+            color=use_color, utf8=utf8, ascii=ASCII_MODE,
+            term=os.environ.get("TERM", ""), platform=sys.platform)
+        if self.session.load_error:
+            self.log.error("session file unreadable", path=self.session.path,
+                           error=self.session.load_error)
+        if self.cfg.load_errors:
+            for problem in self.cfg.load_errors:
+                self.log.error("config problem", error=problem)
+        self.registry.fire("startup", app=self, config=self.cfg)
+        if restore and any(self._restore_flags):
+            self.resumed = True
+            self.info("Resumed your last session  |  F9 menu  F1 help", "ok")
+        elif not args.quiet:
+            self.info("F5 copy  F6 move  F8 delete  F1 help   |   right: %s" % right)
+
+    # -- logging ------------------------------------------------------------
+    def _build_log(self):
+        cfg = self.cfg
+        directory = cfg.get("logging.dir") or os.path.join(
+            config_mod.state_dir(), "logs")
+        log = logging_setup.ActivityLog(
+            enabled=bool(cfg.get("logging.enabled")),
+            level=cfg.get("logging.level"),
+            directory=directory,
+            keep_days=int(cfg.get("logging.keep_days") or 0),
+            echo=bool(cfg.get("logging.echo")))
+        if not log.enabled and log.disabled_reason:
+            # keep it in the process so the UI can tell the user later
+            log.writes = 0
+        return log
+
+    def _load_user_themes(self) -> None:
+        folder = os.path.join(config_mod.config_dir(), "themes")
+        try:
+            names = sorted(n for n in os.listdir(folder) if n.endswith(".json"))
+        except OSError:
+            return
+        for name in names:
+            loaded = theme_mod.load_custom_theme(os.path.join(folder, name))
+            if loaded:
+                self.log.info("theme loaded", theme=loaded[0], file=name)
+            else:
+                self.log.error("theme file invalid", file=name)
 
     # -- terminal modes -----------------------------------------------------
     def _enable_mouse_reporting(self) -> None:
@@ -1434,7 +1555,10 @@ class App:
         panel.index = row
         panel.cursor_name = panel.entries[row].name
         if open_double:
+            before = panel.path
             opened = panel.enter()
+            if opened:
+                self._after_navigate(before)
             self.touch_all()
             if not opened and panel.current() is not None:
                 self.view_file(panel.current())
@@ -1476,7 +1600,7 @@ class App:
     def run(self) -> None:
         try:
             while not self.quit:
-                if self.transfer is None:
+                if self.transfer is None and self.cfg.get("behaviour.auto_refresh"):
                     self.auto_refresh()
                 self.draw()
                 key = self.read_key()
@@ -1484,16 +1608,44 @@ class App:
                     continue
                 try:
                     if isinstance(key, tuple) and key and key[0] == MOUSE_KEY:
+                        self.log.debug("mouse", state=repr(key[1]))
                         self.handle_mouse(key[1])
                     else:
+                        self.log.debug("key", key=repr(key))
+                        self.registry.fire("key", app=self, key=key)
                         self.handle(key)
                 except Exception as exc:  # never let a bug take the UI down
+                    self.log.error("key handler crashed", key=repr(key), exc=exc)
                     try:
                         self.info("Error: %s" % exc, "error")
                     except Exception:
                         pass
         finally:
-            self._disable_mouse_reporting()
+            self._teardown()
+
+    def _teardown(self) -> None:
+        """Always runs: save state, close the log, restore the terminal."""
+        try:
+            self.save_session("quit")
+        except Exception:
+            pass
+        try:
+            self.registry.fire("quit", app=self, config=self.cfg)
+        except Exception:
+            pass
+        try:
+            self.log.session_end("quit", left=self.panels[0].path,
+                                 right=self.panels[1].path)
+            self.log.close()
+        except Exception:
+            pass
+        self._disable_mouse_reporting()
+        if self.cfg.get("behaviour.quit_clears_screen"):
+            try:
+                self.stdscr.clear()
+                self.stdscr.refresh()
+            except curses.error:
+                pass
 
     def handle(self, key) -> None:
         panel = self.panel
@@ -1518,12 +1670,17 @@ class App:
             self.active = 1 - self.active
             self.msg = ""
         elif key in ("\n", "\r", curses.KEY_ENTER):
+            before = panel.path
             opened = panel.enter()
+            if opened:
+                self._after_navigate(before)
             self.touch_all()
             if not opened and panel.current() is not None:
                 self.view_file(panel.current())
         elif key in (curses.KEY_BACKSPACE, "\x7f"):
+            before = panel.path
             panel.go_up()
+            self._after_navigate(before)
             self.touch_all()
         elif key == " ":
             panel.toggle_select()
@@ -1570,6 +1727,12 @@ class App:
             self.archive_menu()
         elif key in ("v",):
             self.view_file(panel.current())
+        elif key in ("t",):
+            self.cycle_theme()
+        elif key in ("S",):
+            self.settings_menu()
+        elif key in ("G",):
+            self.show_log("activity")
         elif key in ("q",):
             self.request_quit()
         elif key in ("Q",):
@@ -1619,6 +1782,176 @@ class App:
                 self.handle_mouse(curses.getmouse())
             except curses.error:
                 pass
+
+    # -- settings -----------------------------------------------------------
+    def settings_menu(self) -> None:
+        """Fully generated settings screen: every schema entry is editable."""
+        rows = self.cfg.describe()
+        labels = []
+        for section, param, value in rows:
+            if param.kind == "bool":
+                shown = "on" if value else "off"
+            elif param.kind == "choice":
+                shown = str(value)
+            else:
+                shown = clip(str(value), 28) if str(value) else "(default)"
+            labels.append("%-12s %-26s %.26s" % (section, param.key, shown))
+        while True:
+            choice = menu(self, "Settings  (Enter = change, Esc = back)", labels,
+                          width=min(self.stdscr.getmaxyx()[1] - 2, 100))
+            if choice is None:
+                return
+            section, param, _value = rows[choice]
+            if param.kind == "bool":
+                new_value = self.cfg.toggle(param.key)
+            elif param.kind == "choice":
+                new_value = self.cfg.cycle(param.key, 1)
+            else:
+                current = self.cfg.get(param.key)
+                text = self.dialog.ask("Setting %s" % param.key, param.help or param.key,
+                                       str(current))
+                if text is None:
+                    continue
+                new_value = self.cfg.set(param.key, text)
+            self.log.action("setting", param.key, value=new_value)
+            self.registry.fire("config_change", key=param.key, value=new_value,
+                               app=self)
+            self._apply_setting(param.key)
+            rows = self.cfg.describe()
+            for idx, (_s, par, val) in enumerate(rows):
+                if par.kind == "bool":
+                    shown = "on" if val else "off"
+                elif par.kind == "choice":
+                    shown = str(val)
+                else:
+                    shown = clip(str(val), 28) if str(val) else "(default)"
+                labels[idx] = "%-12s %-26s %.26s" % (_s, par.key, shown)
+            self.touch_all()
+
+    def _apply_setting(self, key: str) -> None:
+        """Push a changed setting into the running UI."""
+        cfg = self.cfg
+        if key == "ui.theme":
+            name = cfg.get("ui.theme")
+            if name not in theme_mod.THEMES:
+                name = theme_mod.FALLBACK
+            self.cs.set_theme(name)
+            self.registry.fire("theme_change", theme=name, app=self)
+            self.info("Theme: %s" % name, "ok")
+            try:
+                self.stdscr.clear()
+            except curses.error:
+                pass
+        elif key == "ui.border":
+            self.border_style = theme_mod.resolve_border(cfg.get("ui.border"), self.utf8)
+            self.border_chars = theme_mod.border(self.border_style)
+            global BORDER_SPEC
+            BORDER_SPEC = self.border_chars
+            global ASCII_MODE
+            ASCII_MODE = self.border_style == "ascii" or not self.utf8
+            self.info("Border: %s" % self.border_style, "ok")
+            try:
+                self.stdscr.clear()
+            except curses.error:
+                pass
+        elif key == "ui.density":
+            self.info("Density: %s" % cfg.get("ui.density"), "ok")
+        elif key == "ui.show_hidden":
+            for panel in self.panels:
+                panel.show_hidden = bool(cfg.get("ui.show_hidden"))
+                panel.refresh()
+        elif key in ("ui.sort_key", "ui.sort_reverse"):
+            for panel in self.panels:
+                panel.sort_key = cfg.get("ui.sort_key")
+                panel.sort_reverse = bool(cfg.get("ui.sort_reverse"))
+                panel.refresh()
+        elif key == "ui.date_format":
+            fsops.DATE_FORMAT = cfg.get("ui.date_format")
+        elif key == "ui.selected_marker":
+            Panel.SELECTED_MARKER = cfg.get("ui.selected_marker") or "\u2022"
+        elif key == "logging.enabled" or key == "logging.level" or key == "logging.dir":
+            self.log = self._build_log()
+            self.registry.log = self.log
+            self.info("Logging: %s -> %s" % (
+                "on" if self.log.enabled else "off", self.log.activity_file or "-"))
+        elif key == "behaviour.mouse":
+            if cfg.get("behaviour.mouse"):
+                self._enable_mouse_reporting()
+            else:
+                self._disable_mouse_reporting()
+        elif key == "ui.layout":
+            self._mode_override = cfg.get("ui.layout")
+            self._wins = None
+            self._win_geom = None
+        self.touch_all()
+
+    def cycle_theme(self, step: int = 1) -> None:
+        """Instant theme rotation - the fastest way to try all ten looks."""
+        names = [n for n in theme_mod.theme_names() if n in self.cfg.param_choices("ui.theme")]
+        if not names:
+            names = list(theme_mod.theme_names())
+        current = self.cfg.get("ui.theme")
+        try:
+            idx = names.index(current)
+        except ValueError:
+            idx = -1
+        new_name = names[(idx + step) % len(names)]
+        self.cfg.set("ui.theme", new_name)
+        self._apply_setting("ui.theme")
+
+    def show_log(self, which: str = "activity") -> None:
+        path = (self.log.activity_file if which == "activity"
+                else self.log.error_file)
+        if not path or not os.path.exists(path):
+            self.info("No %s log yet today" % which, "error")
+            return
+        text = logging_setup.tail(path, lines=400)
+        view_text(self, "Log - %s (%s)" % (which, os.path.basename(path)), text)
+        self.touch_all()
+
+    def log_status(self) -> None:
+        if not self.log.enabled:
+            self.info("Logging is off%s" % (
+                ": " + self.log.disabled_reason if self.log.disabled_reason else ""),
+                "error")
+            return
+        self.info("Log: %s  (%d lines today)" % (
+            self.log.activity_file, self.log.writes), "ok")
+
+    # -- session ----------------------------------------------------------
+    def session_payload(self) -> dict:
+        payload = {
+            "active": self.active,
+            "layout": self._mode_override,
+            "left": {}, "right": {},
+        }
+        for idx, panel in enumerate(self.panels):
+            key = "left" if idx == 0 else "right"
+            cursor = ""
+            if panel.entries and 0 <= panel.index < len(panel.entries):
+                cursor = panel.entries[panel.index].name
+            payload[key] = {
+                "path": panel.path,
+                "cursor": cursor,
+                "sort": panel.sort_key,
+                "reverse": panel.sort_reverse,
+            }
+        return payload
+
+    def _save_session_soon(self) -> None:
+        """Persist the session right away; cheap (tiny JSON) and crash safe."""
+        if not self.cfg.get("behaviour.restore_session"):
+            return
+        self.session.save(self.session_payload())
+
+    def save_session(self, reason: str = "quit") -> None:
+        if not self.cfg.get("behaviour.restore_session"):
+            return
+        ok = self.session.save(self.session_payload())
+        if not ok:
+            self.log.error("cannot save session", path=self.session.path)
+        self.log.action("session-saved", reason=reason,
+                        left=self.panels[0].path, right=self.panels[1].path)
 
     # -- layout -----------------------------------------------------------
     def cycle_layout(self) -> None:
@@ -1684,9 +2017,12 @@ class App:
             return
         try:
             created = action(target, name)
+            kind = "mkdir" if action is fsops.make_dir else "touch"
+            self.log.action(kind, created)
             self.info("Created %s" % created, "ok")
             self._refresh_all()
         except (OSError, ValueError) as exc:
+            self.log.error("create failed", folder=target, name=name, exc=exc)
             self.info("failed: %s" % exc, "error")
             self.touch_all()
 
@@ -1723,6 +2059,26 @@ class App:
             self.transfer = None
         if result is not None:
             self.report(result)
+            self._log_transfer(mode, sources, dest, result)
+            self.registry.fire("copy" if mode == "copy" else
+                               "move" if mode == "move" else "delete",
+                               app=self, sources=list(sources), dest=dest,
+                               result=result)
+
+    def _log_transfer(self, mode: str, sources, dest: str,
+                      result: fsops.TransferResult) -> None:
+        details = dict(files=result.files, dirs=result.dirs,
+                       bytes=result.bytes_, seconds="%.2f" % result.seconds)
+        if mode in ("copy", "move"):
+            details["dest"] = dest
+        if len(sources) == 1:
+            self.log.action(mode, sources[0], **details)
+        else:
+            self.log.action(mode, "%d items" % len(sources), **details)
+        for problem in result.errors:
+            self.log.error("%s problem" % mode, error=problem)
+        if result.cancelled:
+            self.log.action("%s-cancelled" % mode, dest if mode != "delete" else "")
 
     def report(self, result: fsops.TransferResult) -> None:
         if result.errors:
@@ -1782,9 +2138,11 @@ class App:
             return
         try:
             new_path = fsops.rename_entry(entry.path, name)
+            self.log.action("rename", entry.path, to=os.path.basename(new_path))
             self.info("Renamed to '%s'" % os.path.basename(new_path), "ok")
             self.panel.cursor_name = os.path.basename(new_path)
         except (OSError, ValueError) as exc:
+            self.log.error("rename failed", path=entry.path, exc=exc)
             self.info("rename failed: %s" % exc, "error")
         self.panel.refresh()
         self.touch_all()
@@ -1801,8 +2159,10 @@ class App:
             return
         try:
             mode = fsops.chmod_entry(entry.path, text)
+            self.log.action("chmod", entry.path, mode=oct(mode)[2:])
             self.info("%s -> %s" % (entry.name, oct(mode)[2:]), "ok")
         except (OSError, ValueError) as exc:
+            self.log.error("chmod failed", path=entry.path, exc=exc)
             self.info("chmod failed: %s" % exc, "error")
         self.panel.refresh()
         self.touch_all()
@@ -1865,6 +2225,12 @@ class App:
                 pass
             self.transfer = None
         self.report(result)
+        self.log.action("archive", dest, sources=len(paths), files=result.files,
+                        bytes=result.bytes_, seconds="%.2f" % result.seconds)
+        for problem in result.errors:
+            self.log.error("archive problem", archive=dest, error=problem)
+        self.registry.fire("archive", app=self, sources=list(paths), archive=dest,
+                           result=result)
         self._finish_fs_change()
 
     def extract_archive(self, entry: "Entry | None", to_other: bool = True) -> None:
@@ -1905,6 +2271,13 @@ class App:
                 pass
             self.transfer = None
         self.report(result)
+        self.log.action("extract", entry.path, dest=dest, files=result.files,
+                        bytes=result.bytes_, overwrite=overwrite,
+                        seconds="%.2f" % result.seconds)
+        for problem in result.errors:
+            self.log.error("extract problem", archive=entry.path, error=problem)
+        self.registry.fire("extract", app=self, archive=entry.path, dest=dest,
+                           result=result)
         self._finish_fs_change()
 
     def preview_archive(self, entry: "Entry | None") -> None:
@@ -1936,9 +2309,11 @@ class App:
         if not target:
             return
         try:
-            fsops.make_symlink(self.panel.path, name, target)
+            link = fsops.make_symlink(self.panel.path, name, target)
+            self.log.action("symlink", link, target=target)
             self.info("Symlink created", "ok")
         except (OSError, ValueError) as exc:
+            self.log.error("symlink failed", folder=self.panel.path, exc=exc)
             self.info("symlink failed: %s" % exc, "error")
         self.panel.refresh()
         self.touch_all()
@@ -1974,12 +2349,15 @@ class App:
                                                    time.localtime(st.st_mtime)),
                 "Permissions : %s  (%s)" % (fsops.mode_string(st.st_mode),
                                             oct(st.st_mode & 0o777)[2:]),
-                "Owner       : %s (uid %d), group %s (gid %d)"
-                % (fsops.owner_name(st.st_uid), st.st_uid,
-                   fsops.group_name(st.st_gid), st.st_gid),
-                "Links       : %d" % st.st_nlink,
-                "Inode       : %d" % st.st_ino,
             ]
+            uid = getattr(st, "st_uid", None)
+            if uid is not None:                      # POSIX only
+                lines.append("Owner       : %s (uid %d), group %s (gid %d)"
+                             % (fsops.owner_name(uid), uid,
+                                fsops.group_name(getattr(st, "st_gid", 0)),
+                                getattr(st, "st_gid", 0)))
+                lines.append("Links       : %d" % getattr(st, "st_nlink", 1))
+                lines.append("Inode       : %d" % getattr(st, "st_ino", 0))
         except OSError as exc:
             lines = ["Cannot stat: %s" % exc]
         self.show_message_window("Details - %s" % entry.name, lines)
@@ -2018,6 +2396,9 @@ class App:
             "Switch layout (left-right / stacked)",
             "Switch panel (Tab)",
             "Refresh both panels",
+            "Settings  (theme, borders, behaviour)",
+            "View activity log",
+            "View error log",
             "Help",
             "Quit",
         ]
@@ -2037,6 +2418,9 @@ class App:
             self.cycle_layout,
             self._swap_panel,
             self._refresh_all,
+            self.settings_menu,
+            lambda: self.show_log("activity"),
+            lambda: self.show_log("error"),
             self.show_help,
             self.request_quit,
         ]
@@ -2074,7 +2458,14 @@ class App:
                   "Change permissions", "zip / unzip...",
                   "Switch layout: left-right / stacked",
                   "Show/hide hidden files", "Sort panel",
-                  "Go to /sdcard", "Go to Termux home", "Quit"]
+                  "Go to /sdcard", "Go to Termux home",
+                  "Settings  (theme, borders, behaviour)...",
+                  "Activity log  (what happened today)",
+                  "Error log  (only when something failed)",
+                  "Quit"]
+        plugin_commands = list(self.registry.commands())
+        for label, _handler, _source in plugin_commands:
+            labels.append("Plugin: %s" % label)
         choice = menu(self, "Menu", labels)
         if choice is None:
             return
@@ -2087,13 +2478,28 @@ class App:
             lambda: self.rename(), lambda: self.chmod(), self.archive_menu,
             self.cycle_layout, self.toggle_hidden, self.sort_menu,
             lambda: self.go_to("/sdcard"), lambda: self.go_to("~"),
+            self.settings_menu,
+            lambda: self.show_log("activity"),
+            lambda: self.show_log("error"),
             self.request_quit,
         ]
-        actions[choice]()
+        actions += [handler for _label, handler, _source in plugin_commands]
+        if choice < len(actions):
+            actions[choice]()
 
     def go_to(self, path: str) -> None:
+        before = self.panel.path
         self.panel.chdir(path)
+        self._after_navigate(before)
         self.touch_all()
+
+    def _after_navigate(self, before: str) -> None:
+        after = self.panel.path
+        if after == before:
+            return
+        self.log.action("cd", after, from_=before)
+        self.registry.fire("navigate", app=self, folder=after, previous=before)
+        self._save_session_soon()
 
     def toggle_hidden(self) -> None:
         self.panel.show_hidden = not self.panel.show_hidden
@@ -2115,17 +2521,47 @@ class App:
         self.touch_all()
 
     def edit_config(self) -> None:
-        editor = (os.environ.get("EDITOR") or shutil.which("nano")
-                  or shutil.which("vi") or "vi")
+        """F4 - open config.json in $EDITOR, then re-apply whatever changed."""
+        path = config_mod.config_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            if not os.path.exists(path):
+                self.cfg.save()          # seed it with every default
+        except OSError as exc:
+            self.info("Cannot create %s: %s" % (path, exc), "error")
+            return
+        editor = (os.environ.get("EDITOR") or os.environ.get("VISUAL")
+                  or shutil.which("nano") or shutil.which("vi") or "vi")
         curses.endwin()
         try:
-            subprocess.call([editor, os.path.expanduser("~/.twinpanerc")])
+            subprocess.call([editor, path])
         except OSError as exc:
             sys.stdout.write("Cannot run %s: %s\n" % (editor, exc))
             sys.stdout.flush()
             time.sleep(1.5)
         finally:
             curses.doupdate()
+        before = self.cfg.as_dict()
+        self.cfg = config_mod.get_config(reload=True)
+        self.log.action("config-edited", path, editor=os.path.basename(editor))
+        for problem in self.cfg.load_errors:
+            self.log.error("config problem", error=problem)
+        changed = [key for key, value in self.cfg.as_dict().items()
+                   if before.get(key) != value]
+        for key in changed:
+            self._apply_setting(key)
+            self.registry.fire("config_change", key=key,
+                               value=self.cfg.get(key), app=self)
+        if changed:
+            self.info("Config reloaded - %d setting(s) changed" % len(changed), "ok")
+        else:
+            self.info("Config reloaded - nothing changed", "ok")
+        self.border_style = theme_mod.resolve_border(self.cfg.get("ui.border"), self.utf8)
+        self.border_chars = theme_mod.border(self.border_style)
+        global BORDER_SPEC
+        BORDER_SPEC = self.border_chars
+        for panel in self.panels:
+            panel.refresh()
         self.touch_all()
 
     def view_file(self, entry: "Entry | None") -> None:
@@ -2190,8 +2626,25 @@ def build_parser() -> argparse.ArgumentParser:
                         help="disable mouse reporting (old SSH clients)")
     parser.add_argument("-q", "--quiet", action="store_true",
                         help="no start-up hint")
-    parser.add_argument("--version", action="version", version="twinpane 1.0.0")
+    parser.add_argument("--version", action="version",
+                        version="twinpane %s" % __import__("twinpane").__version__)
     return parser
+
+
+def disable_flow_control() -> None:
+    """Stop the tty from eating Ctrl+S / Ctrl+Q (XON/XOFF).
+
+    Without this, Ctrl+Q (quit) and Ctrl+S silently freeze the terminal
+    instead of reaching curses - a classic midnight-commander gotcha.
+    """
+    try:
+        import termios
+        fd = sys.stdin.fileno()
+        attrs = termios.tcgetattr(fd)
+        attrs[0] &= ~(termios.IXON | termios.IXOFF)
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    except Exception:
+        pass  # not a tty, or Windows: curses handles it
 
 
 def main(argv=None) -> int:
@@ -2206,6 +2659,7 @@ def main(argv=None) -> int:
     app = {}
 
     def traceback_safe(scr):
+        disable_flow_control()
         instance = App(scr, args)
         app["instance"] = instance
         instance.run()

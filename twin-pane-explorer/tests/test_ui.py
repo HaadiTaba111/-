@@ -5,6 +5,7 @@ Needs:     pexpect + pyte  (pip install pexpect pyte)
 """
 import os
 import sys
+import tempfile
 import time
 
 import pytest
@@ -60,8 +61,16 @@ def send_text(child, scr, text, delay=0.05):
     scr.pump(child, 0.5)
 
 
-def start(tmp_path, left, right, extra_env=None):
+def start(tmp_path, left, right, extra_env=None, state_dir=None):
     env = dict(ENV)
+    # every child gets a private config+state folder: no session/theme/plugin
+    # leakage between tests, and nothing is written into the real $HOME
+    home = os.environ.get("TWINPANE_TEST_STATE") or tempfile.mkdtemp(prefix="tp-test-")
+    env["TWINPANE_STATE_DIR"] = os.path.join(home, "state")
+    env["TWINPANE_CONFIG_DIR"] = os.path.join(home, "config")
+    env["HOME"] = home
+    if state_dir:
+        env["TWINPANE_STATE_DIR"] = state_dir
     if extra_env:
         env.update(extra_env)
     child = pexpect.spawn(

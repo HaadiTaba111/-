@@ -1,5 +1,10 @@
 """Twin-Pane Explorer - Termux two-panel file manager."""
 
-from .ui import main  # noqa: F401
+__version__ = "1.1.0"
 
-__all__ = ["main"]
+__all__ = ["__version__", "main"]
+
+
+def main(*args, **kwargs):  # lazy: importing the package must not pull in curses
+    from .ui import main as _main
+    return _main(*args, **kwargs)
