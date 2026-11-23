@@ -274,6 +274,7 @@ def test_mkdir_file_rename_chmod_symlink(sandbox):
     assert os.readlink(str(src / "ln")) == "notes.txt"
 
 
+@needs_posix
 def test_breaking_symlink_is_reported_not_crashing(sandbox):
     src, dst, _ = sandbox
     os.symlink("does-not-exist", src / "dangling")

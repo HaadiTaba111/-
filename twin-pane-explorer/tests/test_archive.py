@@ -20,8 +20,11 @@ def tree(tmp_path):
     (proj / "a.txt").write_text("hello")
     (proj / "sub" / "b.txt").write_text("world" * 200)
     (proj / "run.sh").write_text("#!/bin/sh\n")
-    os.chmod(proj / "run.sh", 0o755)
-    os.symlink("a.txt", proj / "link")
+    # Windows has neither a POSIX mode nor unprivileged symlinks; the archive
+    # code copes without them, so the fixture just skips those two extras there.
+    if os.name != "nt":
+        os.chmod(proj / "run.sh", 0o755)
+        os.symlink("a.txt", proj / "link")
     (work / "single.txt").write_text("lonely")
     return work, proj
 
