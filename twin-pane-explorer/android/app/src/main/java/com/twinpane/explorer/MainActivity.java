@@ -582,12 +582,6 @@ public class MainActivity extends Activity {
         return "python \"" + payloadPath() + "\" --install && twinpane";
     }
 
-    /** True when the program is already installed inside Termux. */
-    @SuppressWarnings("unused")
-    private boolean installedInTermux() {
-        return new File(TERMUX_BIN).exists() && new File(TERMUX_LIB).isDirectory();
-    }
-
     @Override
     protected void onResume() {
         super.onResume();
