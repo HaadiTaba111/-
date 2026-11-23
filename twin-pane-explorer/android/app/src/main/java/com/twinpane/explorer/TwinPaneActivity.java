@@ -634,7 +634,7 @@ public class TwinPaneActivity extends Activity {
 
     private void paintCard(LinearLayout card, boolean isActive, boolean termux) {
         GradientDrawable background = new GradientDrawable();
-        int color;
+        String color;
         if (!isActive) {
             color = "#131a22";
         } else {

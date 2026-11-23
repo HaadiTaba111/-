@@ -57,8 +57,8 @@ public final class TermuxBridge {
 
     /** A listing plus the shortcuts the worker knows about. */
     public static final class Listing {
-        public final String path;
-        public final String parent;
+        public String path;
+        public String parent;
         public final List<Item> items = new ArrayList<>();
         public final List<String[]> places = new ArrayList<>();
         public final List<String> errors = new ArrayList<>();
