@@ -20,15 +20,18 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 COLS, ROWS = 96, 22
 
 
-def capture(keys, left, right, settle=1.2):
+def capture(keys, left, right, settle=1.2, layout=None, cols=None, rows=None):
+    cols = cols or COLS
+    rows = rows or ROWS
     env = dict(os.environ)
     env.update({"TERM": "xterm-256color", "LANG": "C.UTF-8",
                 "PYTHONPATH": ROOT})
-    child = pexpect.spawn(sys.executable,
-                          ["-m", "twinpane", "-l", left, "-r", right, "-q"],
-                          cwd=ROOT, env=env,
-                          dimensions=(ROWS, COLS), timeout=15)
-    screen = pyte.Screen(COLS, ROWS)
+    argv = [sys.executable, "-m", "twinpane", "-l", left, "-r", right, "-q"]
+    if layout:
+        argv += ["--layout", layout]
+    child = pexpect.spawn(argv[0], argv[1:], cwd=ROOT, env=env,
+                          dimensions=(rows, cols), timeout=15)
+    screen = pyte.Screen(cols, rows)
     stream = pyte.Stream()
     stream.attach(screen)
     deadline = time.time() + settle
@@ -86,14 +89,31 @@ SCREENS = []
 
 def build():
     home, card = make_demo_tree()
-    SCREENS.append(("Two panels", "خانه‌ی Termux در چپ، حافظه‌ی گوشی /sdcard در راست",
+    SCREENS.append(("Two panels",
+                    "چپ: خانه‌ی Termux — راست: /sdcard. دوصفحه، دقیقاً مثل NC.",
                     capture([], home, card)))
-    SCREENS.append(("Selection", "انتخاب چند فایل با Space، سپس F5",
+    SCREENS.append(("Selection",
+                    "با Space چند فایل انتخاب شده (•) و شمارنده *2* بالای پنل.",
                     capture(["\x1b[B", "\x1b[B", " ", "\x1b[B", " "], home, card)))
-    SCREENS.append(("Copy confirm", "تاییدیه‌ی کپی با نمایش مبدأ و مقصد",
+    SCREENS.append(("Copy confirm",
+                    "قبل از هر کپی، مبدأ و مقصد نشان داده می‌شود.",
                     capture(["\x1b[B", "\x1b[B", " ", "\x1b[B", " ", "c"],
                             home, card)))
-    SCREENS.append(("Help", "راهنمای کلیدها با F1",
+    SCREENS.append(("Drag between panels",
+                    "کشیدن با انگشت/ماوس از پنل چپ به راست = کپی (با تایید).",
+                    capture(["\x1b[<0;5;6M", "\x1b[<32;30;6M",
+                             "\x1b[<32;60;6M", "\x1b[<32;90;6M"], home, card)))
+    SCREENS.append(("Quick menu (Q)",
+                    "همه‌ی دستورها در یک لیست — برای گوشی که F-key ندارد.",
+                    capture(["Q"], home, card, settle=1.4)))
+    SCREENS.append(("zip / unzip menu (x)",
+                    "فشرده‌سازی zip و tar.gz، استخراج، و پیش‌نمایش محتوا.",
+                    capture(["x"], home, card, settle=1.4)))
+    SCREENS.append(("Phone layout (stacked)",
+                    "در عرض کم، یک پنل تمام‌عرض با سوئیچر بالای آن.",
+                    capture([], home, card, layout="stack", cols=56, rows=24)))
+    SCREENS.append(("Help (F1)",
+                    "راهنمای کامل کلیدها و ماوس.",
                     capture(["\x1bOP"], home, card, settle=1.4)))
 
 

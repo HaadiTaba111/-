@@ -69,7 +69,24 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 5. self-check
+# 5. extra keys (optional, big quality-of-life win on a phone keyboard)
+# ---------------------------------------------------------------------------
+TERMUX_PROPS="$HOME/.termux/termux.properties"
+if [ -f "$APP_DIR/docs/termux.properties" ]; then
+    mkdir -p "$HOME/.termux"
+    if ! grep -q "Twin-Pane Explorer" "$TERMUX_PROPS" 2>/dev/null; then
+        printf '\n# --- Twin-Pane Explorer extra keys (added by install-termux.sh) ---\n' \
+            >> "$TERMUX_PROPS"
+        sed -n '/^extra-keys/,/^]/p' "$APP_DIR/docs/termux.properties" >> "$TERMUX_PROPS"
+        command -v termux-reload-settings >/dev/null 2>&1 && termux-reload-settings || true
+        say "added an extra-keys row to ~/.termux/termux.properties (ESC TAB / - HOME UP ...)"
+    else
+        say "extra keys already configured"
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# 6. self-check
 # ---------------------------------------------------------------------------
 say "running self-test (file operations only) ..."
 if PYTHONPATH="$APP_DIR" python3 - "$APP_DIR" <<'TEST_EOF'
@@ -93,9 +110,18 @@ try:
     assert not moved.errors, moved.errors
     assert not os.path.exists(copied)
     assert os.path.exists(os.path.join(src, "hello.txt"))
+
+    # zip + unzip round-trip (pure stdlib, must work on-device)
+    archive = os.path.join(work, "test.zip")
+    repacked = fsops.create_archive([os.path.join(src, "sub")], archive)
+    assert not repacked.errors, repacked.errors
+    out = os.path.join(work, "unzipped")
+    extracted = fsops.extract_archive(archive, out)
+    assert not extracted.errors, extracted.errors
+    assert os.path.exists(os.path.join(out, "sub", "hello.txt"))
 finally:
     shutil.rmtree(work, ignore_errors=True)
-print("self-test: copy + move OK")
+print("self-test: copy + move + zip + unzip OK")
 TEST_EOF
 then
     say "self-test passed"

@@ -270,6 +270,28 @@ class Panel:
             return True
         return False
 
+    # -- geometry for mouse/touch ------------------------------------------
+    ROW_TITLE, ROW_HEADER, ROW_FIRST = 0, 1, 2
+
+    def row_at(self, window_row: int, height: int = None):
+        """Index of the entry drawn on *window_row* inside this panel window.
+
+        Row 0 is the border+title, row 1 the column header, row 2 the first
+        entry and the last usable row is height-2 (the footer line above the
+        bottom border).  Returns None for anything that is not an entry.
+        """
+        if window_row < self.ROW_FIRST:
+            return None
+        if height is not None and window_row > self.last_visible_row(height):
+            return None
+        idx = self.top + (window_row - self.ROW_FIRST)
+        if 0 <= idx < len(self.entries):
+            return idx
+        return None
+
+    def last_visible_row(self, height: int) -> int:
+        return height - 2
+
     # -- selection ---------------------------------------------------------
     def toggle_select(self) -> None:
         entry = self.current()
@@ -482,6 +504,8 @@ class Dialog:
         win.refresh()
         while True:
             ch = win.get_wch()
+            if ch == "\x1b":
+                ch = "\x1b"
             if ch in ("y", "Y"):
                 self.close(win)
                 return True
@@ -598,6 +622,12 @@ def menu(app: "App", title: str, labels, width: int = 64) -> "int | None":
     index = 0
     top = 0
     visible = h - 3
+    selectable = [i for i, label in enumerate(labels) if label != "---"]
+    if not selectable:
+        Dialog(app).close(win)
+        return None
+    if index not in selectable:
+        index = selectable[0]
     while True:
         if index < top:
             top = index
@@ -607,6 +637,10 @@ def menu(app: "App", title: str, labels, width: int = 64) -> "int | None":
             i = top + row
             if i >= len(labels):
                 break
+            if labels[i] == "---":
+                safe_addstr(win, 1 + row, 2, (" " + "\u2500" * max(0, w - 6)).ljust(w - 4),
+                            app.cs.dialog | app.cs.dim)
+                continue
             attr = app.cs.current if i == index else app.cs.dialog
             safe_addstr(win, 1 + row, 2, (" %2d. %s" % (i + 1, labels[i])).ljust(w - 4),
                         attr)
@@ -614,19 +648,45 @@ def menu(app: "App", title: str, labels, width: int = 64) -> "int | None":
                     app.cs.status_bar | app.cs.dialog)
         win.refresh()
         key = win.get_wch()
+        if key == "\x1b":
+            tail = []
+            win.timeout(45)
+            try:
+                while len(tail) < 12:
+                    try:
+                        ch = win.get_wch()
+                    except curses.error:
+                        break
+                    tail.append(ch)
+                    if not isinstance(ch, str) or ch.isalpha():
+                        break
+            finally:
+                win.timeout(-1)
+            seq = "".join(tail)
+            mapped = decode_escape(seq) if seq else None
+            if mapped is not None:
+                key = mapped
+            elif seq:
+                continue        # unknown sequence: ignore rather than act on it
+            else:
+                key = "\x1b"    # a real, bare Escape press
         if isinstance(key, str) and key.isdigit():
             num = int(key)
-            if 1 <= num <= len(labels):
+            if 1 <= num <= len(labels) and labels[num - 1] != "---":
                 Dialog(app).close(win)
                 return num - 1
         if key in (curses.KEY_UP, "k"):
-            index = (index - 1) % len(labels)
+            pos = selectable.index(index) if index in selectable else 0
+            index = selectable[(pos - 1) % len(selectable)]
         elif key in (curses.KEY_DOWN, "j", "\t"):
-            index = (index + 1) % len(labels)
+            pos = selectable.index(index) if index in selectable else 0
+            index = selectable[(pos + 1) % len(selectable)]
         elif key == curses.KEY_PPAGE:
-            index = max(0, index - visible)
+            pos = selectable.index(index) if index in selectable else 0
+            index = selectable[max(0, pos - visible)]
         elif key == curses.KEY_NPAGE:
-            index = min(len(labels) - 1, index + visible)
+            pos = selectable.index(index) if index in selectable else 0
+            index = selectable[min(len(selectable) - 1, pos + visible)]
         elif key in ("\n", "\r", curses.KEY_ENTER):
             Dialog(app).close(win)
             return index
@@ -661,6 +721,28 @@ def view_text(app: "App", title: str, text: str) -> None:
                         app.cs.status_bar | app.cs.panel)
             win.refresh()
             key = win.get_wch()
+            if key == "\x1b":
+                tail = []
+                win.timeout(45)
+                try:
+                    while len(tail) < 12:
+                        try:
+                            ch = win.get_wch()
+                        except curses.error:
+                            break
+                        tail.append(ch)
+                        if not isinstance(ch, str) or ch.isalpha():
+                            break
+                finally:
+                    win.timeout(-1)
+                seq = "".join(tail)
+                mapped = decode_escape(seq) if seq else None
+                if mapped is not None:
+                    key = mapped
+                elif seq:
+                    continue
+                else:
+                    key = "\x1b"
             if key in (curses.KEY_DOWN, "j"):
                 top = min(max(0, len(lines) - 1), top + 1)
             elif key in (curses.KEY_UP, "k"):
@@ -683,15 +765,31 @@ def view_text(app: "App", title: str, text: str) -> None:
 HELP_TEXT = """\
 Twin-Pane Explorer - a two-panel file manager made for Termux/Android.
 
+MOUSE / TOUCH
+  click / tap            select an entry (focuses that panel first)
+  double click / tap     open folder, or view a file
+  drag between panels    copy the entry to the other panel (asks first)
+  swipe up / down        scroll a list (stacked phone layout)
+  mouse wheel            scroll
+  right click            jump to the other panel
+  Note: tap = one deliberate click.  A quick double tap opens.
+
 MOVING AROUND
   Up / Down / PgUp / PgDn / Home / End     move the cursor
   Enter                                    open folder (or view file)
-  Backspace or ..                          go to parent folder
+  Backspace                                go to parent folder
   Tab, Left, Right                         switch active panel
   /  or Ctrl+G                             go to any path (~ / $VARS work)
   z  or f                                  filter this panel's list (*.jpg)
   a  or Ctrl+H                             show/hide hidden files
   i                                        details of the item (perms, size...)
+
+LAYOUT
+  L or F9 -> Switch layout                 auto: side-by-side on a wide
+                                           terminal, stacked on a phone
+  --layout split      two columns          --layout stack    one panel
+  On a narrow screen the active panel fills the width and the line above
+  it shows which panel you are in; Tab switches.
 
 TRANSFERS
   Space                    select current item and move down
@@ -699,23 +797,31 @@ TRANSFERS
   c or F5                  COPY selected -> other panel
   m or F6                  MOVE selected -> other panel
   F8 or Del                DELETE selected
-  F7                       new folder          r / Ctrl+R   rename
-  o                        actions: new file, symlink, chmod, open with...
+  F7                       new folder (asks WHICH drive first)
+  n                        new empty file (asks which drive first)
+  r or Ctrl+R              rename
   Esc                      cancel a running transfer
 
+ZIP / UNZIP  (no extra packages needed)
+  Z        compress the selection to .zip on the other panel
+  x        zip / unzip menu   (tar.gz, preview contents, extract here)
+  u        extract the archive under the cursor into the other panel
+  Extracting is zip-slip safe: members with ../ or absolute paths are
+  refused, and nothing is written outside the target folder.
+
 OTHER
-  F3 or v       view file (text only)     F2  refresh
-  F4            edit ~/.twinpanerc        F9  menu
-  F10 or q      quit                      Ctrl+L  redraw screen
+  Q or F1       quick menu (every command, one list) / help
+  v or F3       view file              F2   refresh both panels
+  F4            edit ~/.twinpanerc
+  F10 or q      quit                   Ctrl+L  redraw screen
 
 TIPS FOR ANDROID
   The right panel starts in /sdcard when that folder exists, so you can
-  copy files between Termux and shared storage with F5.
+  copy between Termux and shared storage with F5 or a drag.
   If /sdcard gives "Permission denied", run `termux-setup-storage` once
   in Termux and tap Allow.
-
-  Copying from Termux to /sdcard and back is fully supported; moving
-  across the two filesystems (EXDEV) is done as copy+delete automatically.
+  Moving across the two filesystems (EXDEV) is done as copy+delete
+  automatically, and only after the copy finished without errors.
 """
 
 
@@ -743,11 +849,11 @@ def decode_escape(tail: str):
         body = tail[1:]
     else:
         body = tail
-    # ignore modifiers such as 1;5A  -> A
+    # Drop modifiers such as '1;5A' -> 'A' but keep the number in '6~'.
     if ";" in body:
         body = body.rsplit(";", 1)[1]
-    body = body.lstrip("0123456789") if body and body[-1] in "~ABCDHF" \
-        else body
+    if body and body[-1] in "ABCDHFZ":
+        body = body.lstrip("0123456789")
     name = _CSI_KEYS.get(body) or _CSI_KEYS.get(body.lstrip("0123456789;"))
     if name is None:
         # try longest suffix, e.g. '15~' out of '015~'
@@ -758,6 +864,103 @@ def decode_escape(tail: str):
     if name is None:
         return None
     return getattr(curses, name, None)
+
+
+MOUSE_KEY = "<mouse>"  # sentinel returned by read_key() for mouse reports
+
+DEBUG_LOG = None
+
+
+def dbg(*parts) -> None:
+    """Write a line to $TWINPANE_DEBUG when set; otherwise a no-op."""
+    if not DEBUG_LOG:
+        return
+    try:
+        with open(DEBUG_LOG, "a") as handle:
+            handle.write(" ".join(str(p) for p in parts) + "\n")
+    except OSError:
+        pass
+
+# SGR mouse bit flags
+_SGR_SHIFT, _SGR_META, _SGR_CTRL = 4, 8, 16
+_SGR_MOTION, _SGR_WHEEL = 32, 64
+_SGR_BUTTONS = {0: "left", 1: "middle", 2: "right"}
+
+
+def decode_mouse_x10(tail: str):
+    """Decode a legacy X10 report: 'ESC [ M' + 3 bytes (b, x, y each +32)."""
+    if len(tail) < 5 or not tail.startswith("[M"):
+        return None
+    b, x, y = (ord(ch) for ch in tail[2:5])
+    b -= 32
+    x -= 33
+    y -= 33
+    if x < 0 or y < 0:
+        return None
+    bstate = 0
+    low = b & 3
+    motion = b & 32
+    wheel = b & 64
+    if wheel:
+        bstate |= curses.BUTTON4_PRESSED if low == 0 else getattr(
+            curses, "BUTTON5_PRESSED", curses.BUTTON4_PRESSED)
+    elif low == 0:
+        if motion:
+            bstate |= getattr(curses, "BUTTON1_MOVED", 0) or getattr(
+                curses, "REPORT_MOUSE_POSITION", 0)
+        else:
+            bstate |= curses.BUTTON1_PRESSED
+    elif low == 1:
+        bstate |= curses.BUTTON2_PRESSED
+    else:
+        bstate |= curses.BUTTON3_PRESSED
+    return (0, x, y, 0, bstate)
+
+
+def decode_mouse_sgr(tail: str):
+    """Decode 'ESC [ < b ; x ; y M' (SGR) into a curses-like mouse state.
+
+    Returns (id, x, y, z, bstate) with 0-based coordinates, or None.
+    """
+    if not tail.startswith("[<") or len(tail) < 6:
+        return None
+    body = tail[2:]
+    final = body[-1]
+    if final not in "Mm":
+        return None
+    parts = body[:-1].split(";")
+    if len(parts) != 3:
+        return None
+    try:
+        code, x, y = (int(v) for v in parts)
+    except ValueError:
+        return None
+    x -= 1
+    y -= 1
+    bstate = 0
+    base = code & ~(_SGR_MOTION | _SGR_WHEEL | _SGR_SHIFT | _SGR_META | _SGR_CTRL)
+    if code & _SGR_WHEEL:
+        if base == 0:
+            bstate |= curses.BUTTON4_PRESSED
+        else:
+            bstate |= getattr(curses, "BUTTON5_PRESSED", 0)
+    else:
+        button = "left" if base not in (1, 2) else _SGR_BUTTONS[base]
+        if button == "left":
+            if final == "m":
+                bstate |= curses.BUTTON1_RELEASED
+            elif code & _SGR_MOTION:
+                # not every curses build defines BUTTON1_MOVED; fall back to
+                # the generic "position" event so drags still arrive
+                bstate |= getattr(curses, "BUTTON1_MOVED", 0) or getattr(
+                    curses, "REPORT_MOUSE_POSITION", 0)
+            else:
+                bstate |= curses.BUTTON1_PRESSED
+        elif button == "right":
+            bstate |= curses.BUTTON3_PRESSED if final == "M" else curses.BUTTON3_RELEASED
+        else:
+            bstate |= curses.BUTTON2_PRESSED if final == "M" else curses.BUTTON2_RELEASED
+    return (0, x, y, 0, bstate)
 
 
 # ---------------------------------------------------------------------------
@@ -774,11 +977,30 @@ class App:
         self.quit = False
         self._wins = None
         self._win_geom = None
+        self._geom_state = {}
+        self._mode_override = "auto"
+        self._dir_stamps = {}
+        self._dragging = False
+        self._drag_accum = ""
+        self._drag_x = None
+        self._press_x = None
+        self._press_y = None
+        self._drag_from_x = None
+        self._drag_from_y = None
+        self._press_t = 0.0
+        self._mouse_down = False
         stdscr.keypad(True)
         try:
             curses.curs_set(0)
         except curses.error:
             pass
+        try:
+            # 1003 = report motion while a button is held (drag between panels)
+            curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+            curses.mouseinterval(250)
+        except (curses.error, AttributeError):
+            pass
+        self._enable_mouse_reporting()
         if args.color == "never":
             use_color = False
         else:
@@ -808,6 +1030,7 @@ class App:
         else:
             right = os.getcwd()
         self.panels = [Panel(left), Panel(right)]
+        self._mode_override = args.layout
         self.active = 0
         self.dialog = Dialog(self)
         for panel in self.panels:
@@ -815,6 +1038,28 @@ class App:
         if not args.quiet:
             self.info("F5 copy  F6 move  F8 delete  F1 help   |   right panel: %s"
                       % right)
+
+    # -- terminal modes -----------------------------------------------------
+    def _enable_mouse_reporting(self) -> None:
+        """Ask the terminal for all motion + SGR coordinates.
+
+        xterm 1002/1006 covers Termux, iTerm, gnome-terminal, alacritty and
+        every modern terminal; 1015 is the urxvt fallback.
+        """
+        if not self.args.mouse:
+            return
+        try:
+            sys.stdout.write("\x1b[?1000;1002;1003;1006;1015h")
+            sys.stdout.flush()
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    def _disable_mouse_reporting(self) -> None:
+        try:
+            sys.stdout.write("\x1b[?1000;1002;1003;1006;1015l")
+            sys.stdout.flush()
+        except (OSError, ValueError, AttributeError):
+            pass
 
     # -- helpers -----------------------------------------------------------
     @property
@@ -842,27 +1087,50 @@ class App:
         self.draw()
 
     # -- geometry ----------------------------------------------------------
+    def _layout_mode(self):
+        """'split' (side by side), 'stack' (one panel on screen) or 'auto'."""
+        if self._mode_override in ("split", "stack"):
+            return self._mode_override
+        maxy, maxx = self.stdscr.getmaxyx()
+        if maxx < 64 and maxy > 14:
+            return "stack"
+        return "split"
+
     def _layout(self):
+        """Return (body_top, body_h, usable_w)."""
         maxy, maxx = self.stdscr.getmaxyx()
         body_top = 1
         body_h = max(3, maxy - 3 - body_top)
         usable_w = maxx - 1
-        left_w = usable_w // 2
-        return body_h, left_w
+        return body_top, body_h, usable_w
 
-    def _ensure_windows(self, body_h: int, left_w: int):
-        geom = (body_h, left_w)
+    def _ensure_windows(self, body_top: int, body_h: int, usable_w: int):
+        mode = self._layout_mode()
+        geom = (body_top, body_h, usable_w, mode)
         if self._wins is not None and self._win_geom == geom:
             return self._wins
         if self._wins:
             for win in self._wins:
                 del win
-        maxx = self.stdscr.getmaxyx()[1]
-        right_w = maxx - 1 - left_w
-        left_win = curses.newwin(body_h, left_w, 1, 0)
-        right_win = curses.newwin(body_h, right_w, 1, left_w)
-        self._wins = [left_win, right_win]
+            self._wins = None
         self._win_geom = geom
+        self._wins = []
+        if mode == "stack":
+            # One panel at a time, as tall as the terminal: the other one is a
+            # Tab away.  This is the usable mode on phones in portrait.
+            win = curses.newwin(body_h, usable_w, body_top, 0)
+            self._wins = [win]
+            self._stack_slot = 0
+        else:
+            left_w = max(10, usable_w // 2)
+            right_w = usable_w - left_w
+            self._wins = [curses.newwin(body_h, left_w, body_top, 0),
+                          curses.newwin(body_h, right_w, body_top, left_w)]
+        # remember the geometry so mouse clicks can be mapped back to entries
+        self._geom_state = {
+            "mode": mode, "top": body_top, "h": body_h, "w": usable_w,
+            "left_w": (usable_w if mode == "stack" else max(10, usable_w // 2)),
+        }
         return self._wins
 
     # -- drawing -----------------------------------------------------------
@@ -882,9 +1150,10 @@ class App:
                     cs.title)
         right_hint = "Tab:switch  F1:help  F10:quit "
         safe_addstr(stdscr, 0, max(0, usable_w - len(right_hint)), right_hint, cs.title)
-        body_h, left_w = self._layout()
-        status = self.msg or ("Tab=switch  c/F5=copy  m/F6=move  F7=new  F8=delete  F10=quit"
-                              "   |   selected: %d" % len(self.panel.selected))
+        body_top, body_h, usable_w = self._layout()
+        status = self.msg or ("Tab=switch  c/F5=copy  m/F6=move  Z=zip  u=unzip  "
+                              "Q=menu  F10=quit   |   selected: %d"
+                              % len(self.panel.selected))
         if self.transfer is not None:
             # keep the panels readable while a transfer runs in the background
             safe_addstr(stdscr, maxy - 2, 0, clip(status, usable_w), cs.dim)
@@ -903,19 +1172,70 @@ class App:
         # so stdscr must be copied to newscr *before* the overlapping panel
         # windows, otherwise the blank stdscr lines win and panels vanish.
         stdscr.noutrefresh()
-        wins = self._ensure_windows(body_h, left_w)
-        for idx, (panel, win) in enumerate(zip(self.panels, wins)):
-            panel.draw(win, idx == self.active, cs)
+        wins = self._ensure_windows(body_top, body_h, usable_w)
+        mode = self._layout_mode()
+        if mode == "stack":
+            # show the active panel, with a one-line switcher above it
+            self._draw_panel_switcher(stdscr, body_top, usable_w, cs)
+            idx = self.active
+            win = wins[0]
+            win.mvwin(body_top + 1, 0)
+            win.resize(body_h - 1, usable_w)
+            self.panels[idx].draw(win, True, cs)
+            self._geom_state["top"] = body_top + 1
+            self._geom_state["h"] = body_h - 1
+        else:
+            for idx, (panel, win) in enumerate(zip(self.panels, wins)):
+                panel.draw(win, idx == self.active, cs)
+        if self._dragging:
+            self._draw_drag_bar(stdscr, body_top, body_h, usable_w, cs)
         curses.doupdate()
 
+    def _draw_panel_switcher(self, stdscr, body_top: int, usable_w: int, cs) -> None:
+        labels = []
+        for idx, panel in enumerate(self.panels):
+            label = " %s %s " % ("\u25b6" if idx == self.active else "\u25b8",
+                                 clip_left(panel.path, max(8, usable_w // 2 - 8)))
+            labels.append(label)
+        x = 0
+        for idx, label in enumerate(labels):
+            attr = cs.title if idx == self.active else cs.dim
+            safe_addstr(stdscr, body_top, x, clip(label, max(4, usable_w - x)), attr)
+            x += len(label) + 1
+            if x >= usable_w:
+                break
+        hint = " Tab: next panel  F9: layout "
+        safe_addstr(stdscr, body_top, max(0, usable_w - len(hint)), hint, cs.dim)
+
+    def _draw_drag_bar(self, stdscr, body_top: int, body_h: int, usable_w: int, cs) -> None:
+        """Visual feedback while a finger/mouse is dragging between panels."""
+        acc = self._drag_accum
+        if not acc:
+            return
+        if self._layout_mode() == "stack":
+            n = acc.count("\x00up") + acc.count("\x00down")
+            label = " scrolling %d line(s) " % max(1, n)
+            safe_addstr(stdscr, body_top, max(0, usable_w - len(label)), label, cs.progress)
+            return
+        if self._drag_x is None:
+            return
+        x = max(1, min(usable_w - 2, self._drag_x))
+        for y in range(body_top + 1, min(body_top + body_h, stdscr.getmaxyx()[0] - 1)):
+            safe_addstr(stdscr, y, x, "\u2502", cs.progress)
+        # put the hint on the status line so it never covers a panel title
+        label = " release to copy into the other panel "
+        safe_addstr(stdscr, stdscr.getmaxyx()[0] - 2, 0,
+                    clip(label.center(usable_w), usable_w), cs.progress)
+
     # -- input -------------------------------------------------------------
-    def _read_escape_tail(self, max_chars: int = 6, timeout_ms: int = 40) -> str:
+    def _read_escape_tail(self, max_chars: int = 48, timeout_ms: int = 45) -> str:
         """Collect the rest of a CSI/SS3 sequence after a lone ESC.
 
-        Termux keyboards, hardware keyboards and screen/tmux attach sessions
-        do not always emit the exact terminfo string curses expects (e.g.
-        ESC [ A while curses waits for ESC O A).  Reading the tail ourselves
-        makes the arrow / function keys work everywhere.
+        Termux keyboards, hardware keyboards and screen/tmux sessions do not
+        always emit the exact terminfo string curses expects (ESC [ A while
+        curses waits for ESC O A).  SGR mouse reports are far longer than key
+        sequences, so the limit is generous and reading stops on the
+        terminating byte.
         """
         chars = []
         self.stdscr.timeout(timeout_ms)
@@ -925,11 +1245,24 @@ class App:
                     ch = self.stdscr.get_wch()
                 except curses.error:
                     break
-                if isinstance(ch, str):
-                    chars.append(ch)
-                    if ch.isalpha() or ch == "~":
+                if not isinstance(ch, str):
+                    break
+                chars.append(ch)
+                joined = "".join(chars)
+                if joined.startswith("[<"):
+                    # SGR mouse: ESC [ < b ; x ; y M|m -- only M/m terminate,
+                    # and only after the y coordinate (two semicolons).
+                    if joined.count(";") >= 2 and ch in "Mm":
                         break
-                else:
+                    continue
+                if joined.startswith("[M"):
+                    # legacy X10: ESC [ M + exactly three raw coordinate bytes
+                    if len(chars) >= 5:
+                        break
+                    continue
+                if ch.isalpha() or ch == "~":
+                    break
+                if len(chars) > 2 and joined.startswith("[") and ch not in "0123456789;<":
                     break
         finally:
             self.stdscr.timeout(-1)
@@ -943,34 +1276,224 @@ class App:
                 if self.transfer is not None:
                     self.transfer.cancel = True
                     return None
-                return ""
+                return "\x03"
             except curses.error:
                 continue
-            if key != "":
+            if key == curses.KEY_MOUSE:
+                try:
+                    return MOUSE_KEY, curses.getmouse()
+                except curses.error:
+                    continue
+            if key != "\x1b":
                 return key
             tail = self._read_escape_tail()
             if not tail:
-                return ""  # a real, bare Escape press
+                return "\x1b"  # a real, bare Escape press
+            mouse = decode_mouse_sgr(tail) or decode_mouse_x10(tail)
+            if mouse is not None:
+                return MOUSE_KEY, mouse
             mapped = decode_escape(tail)
             if mapped is not None:
                 return mapped
-            # unknown sequence: swallow it instead of acting on its letters
-            continue
+            continue  # unknown sequence: swallow it, never act on its letters
+
+    # -- mouse / touch -----------------------------------------------------
+    def handle_mouse(self, state) -> None:
+        """Turn a mouse/touch event into navigation, drag-to-copy or a tap."""
+        try:
+            _id, mx, my, _mz, bstate = state
+        except (TypeError, ValueError):
+            return
+        mode = self._layout_mode()
+        panel = self.panel
+        release = (curses.BUTTON1_RELEASED | getattr(curses, "BUTTON1_CLICKED", 0))
+        press = (curses.BUTTON1_PRESSED | getattr(curses, "BUTTON1_CLICKED", 0))
+
+        if bstate & getattr(curses, "BUTTON1_DOUBLE_CLICKED", 0):
+            self._mouse_down = False
+            self._drag_from_x = self._drag_from_y = None
+            self._handle_tap(mx, my, open_double=True)
+            self._press_x = self._press_y = None
+            self._dragging = False
+            self._drag_accum = ""
+            return
+
+        if bstate & release:
+            self._mouse_down = False
+            scroll = self._drag_accum
+            big = scroll.count("\x00") >= 2
+            moved = (self._press_x is not None
+                     and abs(mx - self._press_x) + abs(my - (self._press_y or my)) >= 3)
+            self._dragging = False
+            self._drag_accum = ""
+            self._drag_x = None
+            px, py = self._drag_from_x, self._drag_from_y
+            self._press_x = self._press_y = None
+            self._drag_from_x = self._drag_from_y = None
+            if big or (moved and mode == "split"):
+                self._finish_drag(px, py, mx, my, scroll)
+            else:
+                self._handle_tap(mx, my)
+            return
+
+        # Some curses builds lack BUTTON1_MOVED and report plain motion as 0,
+        # so a coordinate change while the button is held *is* the drag signal.
+        if self._mouse_down and self._press_x is not None and (
+                max(abs(mx - self._press_x), abs(my - (self._press_y or my))) >= 2) \
+                and not (bstate & (release | press | curses.BUTTON4_PRESSED)):
+            bstate = bstate | getattr(curses, "REPORT_MOUSE_POSITION", 0) or bstate
+
+        if bstate & press:
+            self._mouse_down = True
+            row, target_panel, _ = self._hit_test(mx, my)
+            if target_panel is not None and target_panel is not panel:
+                self.active = self.panels.index(target_panel)
+                panel = target_panel
+            if row is not None:
+                panel.index = row
+                panel.cursor_name = panel.entries[row].name
+            self._press_x, self._press_y = mx, my
+            self._drag_from_x, self._drag_from_y = mx, my
+            self._dragging = True
+            self._drag_accum = ""
+            self._drag_x = mx
+            self.draw()
+            return
+
+        moved_mask = getattr(curses, "BUTTON1_MOVED", 0) | getattr(
+            curses, "REPORT_MOUSE_POSITION", 0)
+        if moved_mask and bstate & moved_mask:
+            # Terminals differ: some report a dedicated MOVED bit, most only
+            # send REPORT_MOUSE_POSITION while a button is held.  Track the
+            # button state ourselves so a drag is never mistaken for a hover.
+            if not self._mouse_down or self._press_x is None or self._press_y is None:
+                return
+            self._dragging = True
+            self._drag_x = mx
+            dy = my - self._press_y
+            if mode == "stack":
+                # vertical swipe in one panel = scroll the list
+                if abs(dy) >= 2:
+                    panel.move(1 if dy > 0 else -1)
+                    self._drag_accum += "\x00down" if dy > 0 else "\x00up"
+                    self._press_y = my
+                    self.draw()
+            else:
+                dx = mx - self._press_x
+                if abs(dx) >= 2:
+                    self._drag_accum += "\x00right" if dx > 0 else "\x00left"
+                    self._press_x = mx
+                    self.draw()
+            return
+
+        if bstate & curses.BUTTON4_PRESSED:        # wheel up
+            for _ in range(3):
+                panel.move(-1)
+            self.draw()
+            return
+        if bstate & getattr(curses, "BUTTON5_PRESSED", 0):  # wheel down
+            for _ in range(3):
+                panel.move(1)
+            self.draw()
+            return
+        if bstate & (curses.BUTTON3_PRESSED | curses.BUTTON3_CLICKED):  # right click
+            self.active = self.panels.index(self.other)
+            self.info("Panel: %s" % self.panel.path)
+            self.draw()
+            return
+
+    def _hit_test(self, mx: int, my: int):
+        """(entry_index, panel, window_row) for an absolute screen coordinate."""
+        g = self._geom_state or {}
+        top = g.get("top", 1)
+        h = g.get("h", 10)
+        if not (top <= my < top + h):
+            return None, None, None
+        window_row = my - top
+        if g.get("mode", "split") == "stack":
+            row = self.panel.row_at(window_row, h)
+            dbg("hit", mx, my, "stack row=", row, "geom=", g)
+            return row, self.panel, window_row
+        left_w = g.get("left_w", 40)
+        panel = self.panels[0] if mx < left_w else self.panels[1]
+        row = panel.row_at(window_row, h)
+        dbg("hit", mx, my, "row=", row, "winrow=", window_row, "geom=", g)
+        return row, panel, window_row
+
+    def _handle_tap(self, mx: int, my: int, open_double: bool = False) -> None:
+        row, panel, _row_in_win = self._hit_test(mx, my)
+        if panel is None:
+            return
+        if panel is not self.panel:
+            self.active = self.panels.index(panel)
+        panel = self.panel
+        if row is None:
+            self.msg = ""
+            self.draw()
+            return
+        panel.index = row
+        panel.cursor_name = panel.entries[row].name
+        if open_double:
+            opened = panel.enter()
+            self.touch_all()
+            if not opened and panel.current() is not None:
+                self.view_file(panel.current())
+            return
+        self.draw()
+
+    def _finish_drag(self, px, py, mx: int, my: int, scroll: str) -> None:
+        if self._layout_mode() == "stack":
+            return  # vertical swipes only scroll in stacked mode
+        g = self._geom_state or {}
+        left_w = g.get("left_w", 40)
+        if px is None or py is None:
+            return
+        src_idx = 0 if px < left_w else 1
+        dst_idx = 0 if mx < left_w else 1
+        if src_idx == dst_idx:
+            return
+        src_panel = self.panels[src_idx]
+        dst_panel = self.panels[dst_idx]
+        if not src_panel.entries:
+            return
+        paths = src_panel.selected_paths()
+        if not paths:
+            idx = min(src_panel.index, len(src_panel.entries) - 1)
+            paths = [src_panel.entries[idx].path]
+        names = ", ".join(os.path.basename(p) for p in paths[:2])
+        if len(paths) > 2:
+            names += "  +%d" % (len(paths) - 2)
+        if not self.dialog.confirm(
+                "Drag to copy",
+                ["Copy  %s" % names, "", "from: %s" % src_panel.path,
+                 "to:   %s" % dst_panel.path], True):
+            self.touch_all()
+            return
+        self._run_transfer("copy", paths, dst_panel.path)
+        self._finish_fs_change()
 
     # -- main loop ---------------------------------------------------------
     def run(self) -> None:
-        while not self.quit:
-            self.draw()
-            key = self.read_key()
-            if key is None:
-                continue
-            try:
-                self.handle(key)
-            except Exception as exc:  # never let a bug take the UI down
+        try:
+            while not self.quit:
+                if self.transfer is None:
+                    self.auto_refresh()
+                self.draw()
+                key = self.read_key()
+                if key is None:
+                    continue
                 try:
-                    self.info("Error: %s" % exc, "error")
-                except Exception:
-                    pass
+                    if isinstance(key, tuple) and key and key[0] == MOUSE_KEY:
+                        self.handle_mouse(key[1])
+                    else:
+                        self.handle(key)
+                except Exception as exc:  # never let a bug take the UI down
+                    try:
+                        self.info("Error: %s" % exc, "error")
+                    except Exception:
+                        pass
+        finally:
+            self._disable_mouse_reporting()
 
     def handle(self, key) -> None:
         panel = self.panel
@@ -1037,10 +1560,20 @@ class App:
             self.transfer_files("move")
         elif key in ("r",):
             self.rename()
+        elif key in ("n", "N"):
+            self.new_file()
+        elif key in ("u", "U"):
+            self.extract_archive(panel.current(), to_other=True)
+        elif key in ("Z",):
+            self.create_archive(".zip")
+        elif key in ("x", "X"):
+            self.archive_menu()
         elif key in ("v",):
             self.view_file(panel.current())
-        elif key in ("q", "Q"):
+        elif key in ("q",):
             self.request_quit()
+        elif key in ("Q",):
+            self.quick_menu()
         elif key == "\x0c":  # Ctrl+L
             self.stdscr.clear()
             self.touch_all()
@@ -1079,8 +1612,94 @@ class App:
                 self.info("Selection cleared")
             else:
                 self.msg = ""
+        elif key == "L":
+            self.cycle_layout()
         elif key == curses.KEY_MOUSE:
+            try:
+                self.handle_mouse(curses.getmouse())
+            except curses.error:
+                pass
+
+    # -- layout -----------------------------------------------------------
+    def cycle_layout(self) -> None:
+        order = ["auto", "split", "stack"]
+        nxt = order[(order.index(self._mode_override) + 1) % len(order)]
+        self._mode_override = nxt
+        self._wins = None
+        self._win_geom = None
+        labels = {"auto": "automatic (side-by-side / stacked by width)",
+                  "split": "two columns (left / right)",
+                  "stack": "one panel at a time (top / bottom, Tab to switch)"}
+        self.info("Layout: %s" % labels[nxt], "ok")
+        try:
+            self.stdscr.clear()
+        except curses.error:
+            pass
+        self.touch_all()
+
+    def auto_refresh(self) -> bool:
+        """Re-read folders that changed on disk since the last draw.
+
+        Cheap: one stat() per panel per keypress.  Returns True when a panel
+        was refreshed, so the caller can avoid a second redraw.
+        """
+        changed = False
+        for panel in self.panels:
+            try:
+                st = os.stat(panel.path)
+            except OSError:
+                continue
+            key = (st.st_mtime_ns, len(panel.entries))
+            previous = self._dir_stamps.get(panel.path)
+            self._dir_stamps[panel.path] = key
+            if previous is not None and previous != key:
+                panel.refresh()
+                changed = True
+        return changed
+
+    # -- dialogs that choose a target drive / panel -------------------------
+    def _choose_target(self, title: str, ask_name: str, action) -> None:
+        """Let the user pick *which* drive (panel) the new item goes to."""
+        labels = [
+            "Left panel   %s" % self.panels[0].path,
+            "Right panel  %s" % self.panels[1].path,
+            "Other drive...",
+        ]
+        choice = menu(self, title, labels, width=min(78, self.stdscr.getmaxyx()[1] - 2))
+        if choice is None:
             return
+        if choice == 2:
+            path = self.dialog.ask(title, "Folder for the new item (e.g. /sdcard/Download):",
+                                   self.panel.path)
+            if not path:
+                return
+            target = fsops.path_expand(path, self.panel.path)
+            if not os.path.isdir(target):
+                self.info("Not a folder: %s" % target, "error")
+                return
+        else:
+            target = self.panels[choice].path
+        name = self.dialog.ask(title, ask_name % target)
+        if not name:
+            return
+        try:
+            created = action(target, name)
+            self.info("Created %s" % created, "ok")
+            self._refresh_all()
+        except (OSError, ValueError) as exc:
+            self.info("failed: %s" % exc, "error")
+            self.touch_all()
+
+    def new_folder(self) -> None:
+        self._choose_target("New folder", "Folder name in %s:", fsops.make_dir)
+
+    def new_file(self) -> None:
+        self._choose_target("New file", "File name in %s:", fsops.make_file)
+
+    def _refresh_all(self) -> None:
+        for panel in self.panels:
+            panel.refresh()
+        self.touch_all()
 
     # -- transfer helpers ---------------------------------------------------
     def _run_transfer(self, mode: str, sources, dest: str):
@@ -1153,18 +1772,6 @@ class App:
         self._run_transfer("delete", sources, self.panel.path)
         self._finish_fs_change()
 
-    def new_folder(self) -> None:
-        name = self.dialog.ask("New folder", "Name inside %s:" % self.panel.path)
-        if not name:
-            return
-        try:
-            fsops.make_dir(self.panel.path, name)
-            self.info("Created '%s'" % name, "ok")
-        except (OSError, ValueError) as exc:
-            self.info("mkdir failed: %s" % exc, "error")
-        self.panel.refresh()
-        self.touch_all()
-
     def rename(self, entry: "Entry | None" = None) -> None:
         entry = entry or self.panel.current()
         if entry is None:
@@ -1200,17 +1807,125 @@ class App:
         self.panel.refresh()
         self.touch_all()
 
-    def new_file(self) -> None:
-        name = self.dialog.ask("New file", "Name inside %s:" % self.panel.path)
-        if not name:
+    # -- zip / unzip --------------------------------------------------------
+    def archive_menu(self, entry: "Entry | None" = None) -> None:
+        entry = entry or self.panel.current()
+        archive_here = entry is not None and fsops.is_archive(entry.path)
+        labels = [
+            "Extract archive -> other panel" if archive_here else "Extract archive...",
+            "Extract archive -> same folder (here)",
+            "---",
+            "Compress selection (zip) -> other panel",
+            "Compress selection (tar.gz) -> other panel",
+            "Preview archive contents",
+        ]
+        choice = menu(self, "zip / unzip", labels)
+        if choice is None:
             return
+        if choice in (0, 1):
+            self.extract_archive(entry, to_other=(choice == 0))
+        elif choice == 3:
+            self.create_archive(".zip")
+        elif choice == 4:
+            self.create_archive(".tar.gz")
+        elif choice == 5:
+            self.preview_archive(entry)
+
+    def create_archive(self, suffix: str) -> None:
+        paths = self.panel.selected_paths()
+        if not paths:
+            self.info("Select something first (Space) or point at an item", "error")
+            return
+        default = fsops.suggest_archive_name(paths, packed=(suffix == ".zip"))
+        dest_dir = self.other.path
+        dest = self.dialog.ask(
+            "Create archive",
+            "Archive path (in the other panel by default):", os.path.join(dest_dir, default))
+        if not dest:
+            return
+        dest = fsops.path_expand(dest, dest_dir)
+        if fsops.archive_kind(dest) is None:
+            dest += suffix
+        transfer = fsops.Transfer()
+        self.transfer = transfer
+        progress = Progress(self, "Compressing...")
+        transfer.progress_cb = progress
         try:
-            fsops.make_file(self.panel.path, name)
-            self.info("Created '%s'" % name, "ok")
-        except (OSError, ValueError) as exc:
-            self.info("create failed: %s" % exc, "error")
-        self.panel.refresh()
-        self.touch_all()
+            result = fsops.create_archive(paths, dest, self.dialog.conflict, transfer)
+        except fsops.TransferError as exc:
+            progress.finish()
+            self.transfer = None
+            self.info(str(exc), "error")
+            self.touch_all()
+            return
+        finally:
+            try:
+                progress.finish()
+            except Exception:
+                pass
+            self.transfer = None
+        self.report(result)
+        self._finish_fs_change()
+
+    def extract_archive(self, entry: "Entry | None", to_other: bool = True) -> None:
+        if entry is None or entry.is_dir:
+            self.info("Put the cursor on an archive file first", "error")
+            return
+        if not fsops.is_archive(entry.path):
+            self.info("%s is not a zip/tar archive" % entry.name, "error")
+            return
+        # default: a uniquely-named folder inside the other panel's folder
+        default = fsops.suggest_archive_target(entry.path, self.other.path)
+        dest = self.dialog.ask("Extract archive",
+                               "Extract '%s' into:" % clip(entry.name, 40), default)
+        if not dest:
+            return
+        dest = fsops.path_expand(dest, self.panel.path)
+        if os.path.lexists(dest) and not os.path.isdir(dest):
+            self.info("Destination exists and is not a folder", "error")
+            return
+        overwrite = False
+        if os.path.isdir(dest) and os.listdir(dest):
+            answer = self.dialog.confirm(
+                "Extract archive",
+                ["%s already contains files." % dest, "",
+                 "Overwrite files that already exist?"], False)
+            overwrite = answer
+        transfer = fsops.Transfer()
+        self.transfer = transfer
+        progress = Progress(self, "Extracting...")
+        transfer.progress_cb = progress
+        try:
+            result = fsops.extract_archive(entry.path, dest,
+                                           transfer=transfer, overwrite=overwrite)
+        finally:
+            try:
+                progress.finish()
+            except Exception:
+                pass
+            self.transfer = None
+        self.report(result)
+        self._finish_fs_change()
+
+    def preview_archive(self, entry: "Entry | None") -> None:
+        if entry is None:
+            self.info("Put the cursor on an archive file first", "error")
+            return
+        if not fsops.is_archive(entry.path):
+            self.info("%s is not a zip/tar archive" % entry.name, "error")
+            return
+        items = fsops.list_archive(entry.path)
+        if not items:
+            self.info("Archive is empty or unreadable", "error")
+            return
+        lines = ["%d member(s) in %s" % (len(items), entry.name), ""]
+        for name, is_dir, size in items[:400]:
+            prefix = "[dir] " if is_dir else "      "
+            size_text = fsops.human_size(size) if not is_dir else ""
+            lines.append("%s%s  %s" % (prefix, name, size_text))
+        if len(items) > 400:
+            lines.append("... and %d more" % (len(items) - 400))
+        self.show_message_window("Archive - %s" % entry.name, lines)
 
     def symlink(self) -> None:
         name = self.dialog.ask("New symlink", "Link name inside %s:" % self.panel.path)
@@ -1274,8 +1989,8 @@ class App:
 
     def actions_menu(self) -> None:
         labels = ["Open folder / view file", "Rename", "Permissions (chmod)",
-                  "New folder", "New empty file", "New symlink", "View file",
-                  "Open with termux-open"]
+                  "New folder...", "New empty file...", "New symlink", "View file",
+                  "Open with termux-open", "zip / unzip...", "Switch layout"]
         choice = menu(self, "Actions", labels)
         if choice is None:
             return
@@ -1283,8 +1998,53 @@ class App:
             self.actions_open, lambda: self.rename(), lambda: self.chmod(),
             self.new_folder, self.new_file, self.symlink,
             lambda: self.view_file(self.panel.current()), self.actions_external,
+            self.archive_menu, self.cycle_layout,
         ]
         actions[choice]()
+        self.touch_all()
+
+    def quick_menu(self) -> None:
+        """One flat menu - handy on a phone where F-keys are unreachable."""
+        labels = [
+            "Copy selection -> other panel",
+            "Move selection -> other panel",
+            "Delete selection",
+            "Rename",
+            "New folder (choose drive)",
+            "New file (choose drive)",
+            "zip   - compress selection",
+            "unzip - extract archive",
+            "View / open",
+            "Switch layout (left-right / stacked)",
+            "Switch panel (Tab)",
+            "Refresh both panels",
+            "Help",
+            "Quit",
+        ]
+        choice = menu(self, "Quick menu", labels)
+        if choice is None:
+            return
+        actions = [
+            lambda: self.transfer_files("copy"),
+            lambda: self.transfer_files("move"),
+            self.delete_files,
+            lambda: self.rename(),
+            self.new_folder,
+            self.new_file,
+            lambda: self.create_archive(".zip"),
+            lambda: self.extract_archive(self.panel.current(), True),
+            self.actions_open,
+            self.cycle_layout,
+            self._swap_panel,
+            self._refresh_all,
+            self.show_help,
+            self.request_quit,
+        ]
+        actions[choice]()
+        self.touch_all()
+
+    def _swap_panel(self) -> None:
+        self.active = 1 - self.active
         self.touch_all()
 
     def actions_open(self) -> None:
@@ -1308,20 +2068,24 @@ class App:
             self.info("open failed: %s" % exc, "error")
 
     def main_menu(self) -> None:
-        labels = ["Help", "Refresh panel", "Copy to other panel", "Move to other panel",
-                  "New folder", "Delete", "Rename", "Change permissions",
+        labels = ["Help", "Quick menu (everything)", "Refresh panel",
+                  "Copy to other panel", "Move to other panel",
+                  "New folder...", "New file...", "Delete", "Rename",
+                  "Change permissions", "zip / unzip...",
+                  "Switch layout: left-right / stacked",
                   "Show/hide hidden files", "Sort panel",
                   "Go to /sdcard", "Go to Termux home", "Quit"]
         choice = menu(self, "Menu", labels)
         if choice is None:
             return
         actions = [
-            self.show_help,
+            self.show_help, self.quick_menu,
             lambda: (self.panel.refresh(), self.touch_all()),
             lambda: self.transfer_files("copy"),
             lambda: self.transfer_files("move"),
-            self.new_folder, self.delete_files, lambda: self.rename(),
-            lambda: self.chmod(), self.toggle_hidden, self.sort_menu,
+            self.new_folder, self.new_file, self.delete_files,
+            lambda: self.rename(), lambda: self.chmod(), self.archive_menu,
+            self.cycle_layout, self.toggle_hidden, self.sort_menu,
             lambda: self.go_to("/sdcard"), lambda: self.go_to("~"),
             self.request_quit,
         ]
@@ -1418,6 +2182,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="ASCII boxes only (old terminals)")
     parser.add_argument("--color", choices=["auto", "never"], default="auto",
                         help="colour mode (default: auto)")
+    parser.add_argument("--layout", choices=["auto", "split", "stack"], default="auto",
+                        help="panel layout: side-by-side, one-panel (phones), or auto")
+    parser.add_argument("--mouse", dest="mouse", action="store_true", default=True,
+                        help="enable mouse/touch support (default: on)")
+    parser.add_argument("--no-mouse", dest="mouse", action="store_false",
+                        help="disable mouse reporting (old SSH clients)")
     parser.add_argument("-q", "--quiet", action="store_true",
                         help="no start-up hint")
     parser.add_argument("--version", action="version", version="twinpane 1.0.0")
@@ -1431,10 +2201,26 @@ def main(argv=None) -> int:
         return 2
     os.environ.setdefault("ESCDELAY", "25")
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+    global DEBUG_LOG
+    DEBUG_LOG = os.environ.get("TWINPANE_DEBUG") or None
+    app = {}
+
+    def traceback_safe(scr):
+        instance = App(scr, args)
+        app["instance"] = instance
+        instance.run()
+
     try:
-        curses.wrapper(lambda scr: App(scr, args).run())
+        curses.wrapper(traceback_safe)
     except KeyboardInterrupt:
         return 130
+    finally:
+        # Mouse reporting and keypad modes must never leak into the shell.
+        try:
+            sys.stdout.write("\x1b[?1000;1002;1003;1006;1015l\x1b[?25h\x1b[?1l\x1b>")
+            sys.stdout.flush()
+        except Exception:
+            pass
     return 0
 
 

@@ -782,3 +782,473 @@ class Transfer:
                     self.result.files += 1
             except OSError:
                 self._error(path, exc)
+
+
+# ---------------------------------------------------------------------------
+# Archives: zip / tar.*  (zipfile and tarfile are part of the stdlib, so this
+# works on Termux with no extra packages; never shell out to `zip`/`unzip`)
+# ---------------------------------------------------------------------------
+
+import tarfile  # noqa: E402  (kept at the bottom to keep the core imports tidy)
+import zipfile  # noqa: E402
+
+ZIP_EXTS = (".zip", ".apk", ".jar", ".xpi", ".epub", ".whl", ".docx", ".xlsx")
+TAR_EXTS = (".tar", ".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz",
+            ".tar.zst", ".tgz".replace("tgz", "tar.Z"))
+
+
+def archive_kind(path: str) -> Optional[str]:
+    """Return 'zip', 'tar' or None for *path*."""
+    name = os.path.basename(path).lower()
+    if name.endswith(ZIP_EXTS):
+        return "zip"
+    if name.endswith(TAR_EXTS) or name.endswith(".tar.zst"):
+        return "tar"
+    return None
+
+
+def looks_like_zip(path: str) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(2) == b"PK"
+    except OSError:
+        return False
+
+
+def is_archive(path: str) -> bool:
+    if not os.path.isfile(path):
+        return False
+    if archive_kind(path):
+        return True
+    return looks_like_zip(path)
+
+
+def _safe_member(name: str):
+    """Clean a member path and reject absolute / traversal paths.
+
+    Zip-slip and tar-slip are the classic archive attacks: a member named
+    '../../etc/passwd' must never be written outside the destination.
+    Returns the cleaned relative path, or None when the member is unsafe.
+    """
+    name = name.replace("\\", "/")
+    while name.startswith("./"):
+        name = name[2:]
+    if not name or name in (".", "/"):
+        return None
+    if name.startswith("/") or re.match(r"^[A-Za-z]:/", name):
+        return None
+    parts = [p for p in name.split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        return None
+    return "/".join(parts)
+
+
+def list_archive(path: str):
+    """[(name, is_dir, size)] for display, safe to call on any file."""
+    items = []
+    try:
+        kind = archive_kind(path) or ("zip" if looks_like_zip(path) else None)
+        if kind == "zip":
+            with zipfile.ZipFile(path) as zf:
+                for info in zf.infolist():
+                    items.append((info.filename, info.is_dir(), info.file_size))
+        elif kind == "tar":
+            with tarfile.open(path, "r:*") as tf:
+                for member in tf.getmembers():
+                    items.append((member.name, member.isdir(), member.size))
+    except (OSError, zipfile.BadZipFile, tarfile.TarError):
+        return []
+    items.sort(key=lambda item: natural_key(item[0]))
+    return items
+
+
+def suggest_archive_target(src_path: str, parent: str = None) -> str:
+    """Where to unpack *src_path* by default: a sibling folder with its stem.
+
+    The name is made unique so extracting never silently mixes into an
+    existing folder that happens to have the same name.
+    """
+    base = os.path.basename(src_path)
+    for ext in (".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst", ".tgz", ".tbz2",
+                ".txz", ".zip", ".tar", ".apk", ".jar"):
+        if base.lower().endswith(ext):
+            base = base[: -len(ext)]
+            break
+    else:
+        base = os.path.splitext(base)[0]
+    folder = parent if parent is not None else (os.path.dirname(src_path) or ".")
+    return unique_path(os.path.join(folder, base or "extracted"))
+
+
+def suggest_archive_name(sources: List[str], packed: bool = True) -> str:
+    """`photos` for one folder, `photos-and-2-more` for several items."""
+    stems = []
+    for src in sources:
+        stem = os.path.basename(src.rstrip(os.sep)) or "item"
+        stems.append(stem)
+    if len(stems) == 1:
+        return stems[0] + (".zip" if packed else ".tar.gz")
+    first = stems[0] + "-and-%d-more" % (len(stems) - 1)
+    return first + (".zip" if packed else ".tar.gz")
+
+
+class ArchiveConflict:
+    """Outcome of a would-be overwrite during extraction."""
+
+    def __init__(self, path: str):
+        self.path = path
+
+
+def _unique_file(path: str) -> str:
+    return unique_path(path)
+
+def _plan_archive(sources: List[str], counter: "Transfer"):
+    """[(abs_path, arcname, is_dir)] for every member to store."""
+    plan = []
+    for src in sources:
+        src_abs = os.path.abspath(src)
+        if os.path.islink(src_abs) or os.path.isfile(src_abs):
+            plan.append((src_abs, os.path.basename(src_abs), False))
+        elif os.path.isdir(src_abs):
+            root_name = os.path.basename(src_abs) or "root"
+            plan.append((src_abs, root_name, True))
+            for walk_root, dirnames, filenames in os.walk(src_abs):
+                dirnames.sort(key=natural_key)
+                rel_root = os.path.relpath(walk_root, src_abs)
+                if rel_root == ".":
+                    rel_root = ""
+                for dname in dirnames:
+                    arcname = root_name + "/"
+                    if rel_root:
+                        arcname += rel_root.replace(os.sep, "/") + "/"
+                    plan.append((os.path.join(walk_root, dname), arcname + dname, True))
+                for fname in sorted(filenames, key=natural_key):
+                    arcname = root_name + "/"
+                    if rel_root:
+                        arcname += rel_root.replace(os.sep, "/") + "/"
+                    plan.append((os.path.join(walk_root, fname), arcname + fname, False))
+            counter._check()
+    return plan
+
+
+# -- compression --------------------------------------------------------------
+
+def create_archive(sources: List[str], dest_file: str,
+                   on_conflict: Optional[Callable[[str], str]] = None,
+                   transfer: Optional["Transfer"] = None) -> TransferResult:
+    """Create a .zip or .tar.* archive at *dest_file* holding *sources*.
+
+    *sources* may be files or folders; folders are stored recursively with
+    their own name as the top-level member, exactly like `zip -r`.
+    """
+    result = TransferResult(kind="archived")
+    t0 = time.monotonic()
+    counter = transfer or Transfer()
+    dest_abs = os.path.abspath(dest_file)
+    parent = os.path.dirname(dest_abs) or "."
+    if not os.path.isdir(parent):
+        raise TransferError("Destination folder does not exist: %s" % parent)
+    if not sources:
+        raise TransferError("Nothing selected")
+    for src in sources:
+        src_abs = os.path.abspath(src)
+        if src_abs == dest_abs:
+            raise TransferError("Cannot put an archive inside itself")
+        if os.path.isdir(src_abs) and not os.path.islink(src_abs) and \
+                (dest_abs + os.sep).startswith(src_abs.rstrip(os.sep) + os.sep):
+            raise TransferError("Cannot create the archive inside '%s'"
+                                % os.path.basename(src_abs))
+
+    kind = archive_kind(dest_abs)
+    if kind is None:
+        raise TransferError("Use a .zip or .tar.gz name for the archive")
+
+    try:
+        plan = _plan_archive(sources, counter)
+    except Cancelled:
+        result.cancelled = True
+        result.seconds = time.monotonic() - t0
+        return result
+
+    if on_conflict is not None and os.path.lexists(dest_abs):
+        action = on_conflict(dest_abs)
+        if action in (SKIP, SKIP_ALL):
+            result.skipped += 1
+            result.seconds = time.monotonic() - t0
+            return result
+        if action in (CANCEL,):
+            result.cancelled = True
+            result.seconds = time.monotonic() - t0
+            return result
+        if action == RENAME:
+            dest_abs = _unique_file(dest_abs)
+
+    tmp_path = dest_abs + ".part"
+    try:
+        if kind == "zip":
+            _write_zip(plan, tmp_path, counter, result)
+        else:
+            _write_tar(plan, tmp_path, counter, result)
+        os.replace(tmp_path, dest_abs)
+    except Cancelled:
+        result.cancelled = True
+    except (OSError, zipfile.BadZipFile, tarfile.TarError) as exc:
+        result.errors.append("%s: %s" % (os.path.basename(dest_abs), exc))
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except OSError:
+            pass
+        result.seconds = time.monotonic() - t0
+        if counter.progress_cb:
+            counter.progress_cb("done", result.bytes_, result.bytes_, 0.0, "")
+    return result
+
+
+def _write_zip(plan, tmp_path: str, counter: "Transfer", result: TransferResult) -> None:
+    written = set()
+    with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED,
+                         compresslevel=6, allowZip64=True) as zf:
+        for src, arcname, is_dir in plan:
+            counter._check()
+            arcname = arcname.replace(os.sep, "/")
+            if is_dir:
+                if not arcname.endswith("/"):
+                    arcname += "/"
+                if arcname not in written:
+                    info = zipfile.ZipInfo(arcname)
+                    info.external_attr = (0o40755 << 16) | 0x10
+                    zf.writestr(info, b"")
+                    written.add(arcname)
+                    result.dirs += 1
+                continue
+            if os.path.islink(src):
+                target = os.readlink(src)
+                info = zipfile.ZipInfo(arcname)
+                info.external_attr = (0o120777 << 16) | 0x10
+                zf.writestr(info, target)
+                written.add(arcname)
+                result.files += 1
+                continue
+            try:
+                info = zipfile.ZipInfo.from_file(src, arcname)
+            except OSError as exc:
+                counter._error(src, exc)
+                continue
+            info.compress_type = zipfile.ZIP_DEFLATED
+            try:
+                with open(src, "rb") as fh, zf.open(info, "w") as out:
+                    while True:
+                        counter._check()
+                        chunk = fh.read(CHUNK)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        result.bytes_ += len(chunk)
+                        counter._emit("archive", arcname)
+                result.files += 1
+            except OSError as exc:
+                counter._error(src, exc)
+
+
+def _write_tar(plan, tmp_path: str, counter: "Transfer", result: TransferResult) -> None:
+    mode = "w:gz"
+    low = tmp_path.lower()
+    if low.endswith(".tar.bz2") or low.endswith(".tbz2"):
+        mode = "w:bz2"
+    elif low.endswith(".tar.xz") or low.endswith(".txz"):
+        mode = "w:xz"
+    elif low.endswith(".tar"):
+        mode = "w"
+    with tarfile.open(tmp_path, mode, format=tarfile.PAX_FORMAT) as tf:
+        added = set()
+        for src, arcname, is_dir in plan:
+            counter._check()
+            try:
+                info = tf.gettarinfo(src, arcname=arcname)
+            except OSError as exc:
+                counter._error(src, exc)
+                continue
+            if arcname in added:
+                continue
+            added.add(arcname)
+            if info is None:
+                continue
+            if info.isreg():
+                with open(src, "rb") as fh:
+                    tf.addfile(info, fh)
+                result.files += 1
+                result.bytes_ += info.size
+                counter._emit("archive", arcname)
+            else:
+                tf.addfile(info)
+                if info.isdir():
+                    result.dirs += 1
+                else:
+                    result.files += 1
+
+
+# -- extraction ---------------------------------------------------------------
+
+def _target_for(root: str, member: str) -> str:
+    return os.path.join(root, member.replace("/", os.sep))
+
+
+def extract_archive(path: str, dest_dir: str,
+                    on_conflict: Optional[Callable[[str], bool]] = None,
+                    transfer: Optional["Transfer"] = None,
+                    overwrite: bool = False) -> TransferResult:
+    """Extract a zip/tar into *dest_dir* with zip-slip protection.
+
+    Returns a result whose ``errors`` list also receives unsafe members.
+    """
+    result = TransferResult(kind="extracted")
+    t0 = time.monotonic()
+    counter = transfer or Transfer()
+    if not os.path.isdir(dest_dir):
+        os.makedirs(dest_dir, exist_ok=True)
+    try:
+        kind = archive_kind(path) or ("zip" if looks_like_zip(path) else None)
+        if kind is None:
+            raise TransferError("Not a supported archive: %s" % os.path.basename(path))
+        if kind == "zip":
+            _extract_zip(path, dest_dir, counter, result, overwrite)
+        else:
+            _extract_tar(path, dest_dir, counter, result, overwrite)
+    except Cancelled:
+        result.cancelled = True
+    except (OSError, zipfile.BadZipFile, tarfile.TarError) as exc:
+        result.errors.append("%s: %s" % (os.path.basename(path), exc))
+    finally:
+        result.seconds = time.monotonic() - t0
+        if counter.progress_cb:
+            counter.progress_cb("done", result.bytes_, result.bytes_, 0.0, "")
+    return result
+
+
+def _extract_zip(path: str, dest_dir: str, counter: "Transfer",
+                 result: TransferResult, overwrite: bool) -> None:
+    with zipfile.ZipFile(path) as zf:
+        members = zf.infolist()
+        counter._total_bytes = sum(max(0, m.file_size) for m in members)
+        for info in members:
+            counter._check()
+            member = _safe_member(info.filename)
+            if member is None:
+                result.errors.append("unsafe path skipped: %s" % info.filename)
+                continue
+            target = _target_for(dest_dir, member)
+            if info.is_dir():
+                try:
+                    os.makedirs(target, exist_ok=True)
+                    result.dirs += 1
+                except OSError as exc:
+                    counter._error(target, exc)
+                continue
+            os.makedirs(os.path.dirname(target) or dest_dir, exist_ok=True)
+            mode = (info.external_attr >> 16) & 0o777
+            if overwrite and os.path.lexists(target):
+                try:
+                    if os.path.isdir(target) and not os.path.islink(target):
+                        shutil.rmtree(target)
+                    else:
+                        os.unlink(target)
+                except OSError:
+                    pass
+            if os.path.lexists(target):
+                result.skipped += 1
+                continue
+            try:
+                with zf.open(info) as src, open(target, "wb") as out:
+                    while True:
+                        counter._check()
+                        chunk = src.read(CHUNK)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        counter._done_bytes += len(chunk)
+                        result.bytes_ += len(chunk)
+                        counter._emit("extract", member)
+                if mode:
+                    try:
+                        os.chmod(target, mode)
+                    except OSError:
+                        pass
+                result.files += 1
+            except OSError as exc:
+                counter._error(target, exc)
+
+
+def _extract_tar(path: str, dest_dir: str, counter: "Transfer",
+                 result: TransferResult, overwrite: bool) -> None:
+    with tarfile.open(path, "r:*") as tf:
+        members = tf.getmembers()
+        counter._total_bytes = sum(max(0, m.size) for m in members if m.isfile())
+        for member in members:
+            counter._check()
+            member_name = _safe_member(member.name)
+            if member_name is None:
+                result.errors.append("unsafe path skipped: %s" % member.name)
+                continue
+            target = _target_for(dest_dir, member_name)
+            if member.isdir():
+                try:
+                    os.makedirs(target, exist_ok=True)
+                    result.dirs += 1
+                except OSError as exc:
+                    counter._error(target, exc)
+                continue
+            if member.issym():
+                # only allow links whose target stays inside the destination
+                link_target = member.linkname.replace("\\", "/")
+                resolved = os.path.normpath(os.path.join(os.path.dirname(member_name),
+                                                         link_target))
+                if resolved.startswith("..") or os.path.isabs(link_target):
+                    result.errors.append("unsafe link skipped: %s" % member.name)
+                    continue
+                os.makedirs(os.path.dirname(target) or dest_dir, exist_ok=True)
+                if not os.path.lexists(target):
+                    try:
+                        os.symlink(member.linkname, target)
+                        result.files += 1
+                    except OSError as exc:
+                        counter._error(target, exc)
+                else:
+                    result.skipped += 1
+                continue
+            if not member.isfile():
+                continue  # devices, fifos: never create them
+            os.makedirs(os.path.dirname(target) or dest_dir, exist_ok=True)
+            if overwrite and os.path.lexists(target):
+                try:
+                    if os.path.isdir(target) and not os.path.islink(target):
+                        shutil.rmtree(target)
+                    else:
+                        os.unlink(target)
+                except OSError:
+                    pass
+            if os.path.lexists(target):
+                result.skipped += 1
+                continue
+            try:
+                source = tf.extractfile(member)
+                if source is None:
+                    continue
+                with source, open(target, "wb") as out:
+                    while True:
+                        counter._check()
+                        chunk = source.read(CHUNK)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        counter._done_bytes += len(chunk)
+                        result.bytes_ += len(chunk)
+                        counter._emit("extract", member_name)
+                try:
+                    os.chmod(target, member.mode & 0o777)
+                except OSError:
+                    pass
+                result.files += 1
+            except (OSError, tarfile.TarError) as exc:
+                counter._error(target, exc)
