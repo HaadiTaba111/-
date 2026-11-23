@@ -80,14 +80,27 @@ jobs:
 
       - name: Gradle wrapper
         run: |
-          if [ ! -f android/gradlew ]; then
-            mkdir -p /tmp/wrap && cd /tmp/wrap
-            curl -sSL -o gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
-            unzip -q gradle.zip
-            cd "$GITHUB_WORKSPACE/twin-pane-explorer/android"
-            /tmp/wrap/gradle-8.7/bin/gradle wrapper --gradle-version 8.7
+          # The step already runs in twin-pane-explorer/, so paths are relative
+          # to it.  Prefer the wrapper if the repo has one; otherwise generate
+          # it from the Gradle that the runner image provides.
+          if [ -f android/gradlew ]; then
+            chmod +x android/gradlew
+            echo "using the checked-in wrapper"
+            exit 0
+          fi
+          if command -v gradle >/dev/null 2>&1; then
+            echo "using $(gradle --version | head -3 | tr '\n' ' ')"
+            ( cd android && gradle wrapper --gradle-version 8.7 --no-daemon )
+          else
+            echo "no gradle on PATH - downloading a distribution"
+            curl -sSL -o /tmp/gradle.zip \
+              https://services.gradle.org/distributions/gradle-8.7-bin.zip
+            unzip -q /tmp/gradle.zip -d /tmp
+            ( cd android && /tmp/gradle-8.7/bin/gradle wrapper \
+                --gradle-version 8.7 --no-daemon )
           fi
           chmod +x android/gradlew
+          ls -l android/gradlew android/gradle/wrapper/
 
       - name: Build debug APK
         run: |
