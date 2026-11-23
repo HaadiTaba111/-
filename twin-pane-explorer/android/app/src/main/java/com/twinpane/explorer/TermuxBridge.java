@@ -145,7 +145,11 @@ public final class TermuxBridge {
         }
 
         String id = newId();
-        request.put("id", id);
+        try {
+            request.put("id", id);
+        } catch (JSONException error) {
+            throw new IOException("cannot build the request: " + error.getMessage());
+        }
 
         File temporary = new File(requests, id + ".json.tmp");
         File finalName = new File(requests, id + ".json");
