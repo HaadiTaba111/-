@@ -35,21 +35,39 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pyinstaller windows-curses pytest
 
-      - name: Unit tests (POSIX-only cases skipped)
+      - name: Environment probe
         shell: pwsh
         run: |
-          # -rf prints the reason behind every failure in the log tail, which is
-          # the only place this job can be inspected from.
+          python -c "import sys,platform;print(sys.version);print(platform.platform())"
+          python -m pip list 2>$null | Select-String -Pattern "curses|pytest"
+          python -c "import curses; print('curses', getattr(curses,'version','?'))"
+
+      - name: Unit tests (POSIX-only cases skipped)
+        shell: pwsh
+        continue-on-error: true
+        id: tests
+        run: |
+          # The full report goes to an artifact: job logs cannot be fetched
+          # from this repo's tooling, so the file is the only way to see why.
           python -m pytest -q -rf --tb=short -m "not needs_pty" `
-            tests/test_fsops.py tests/test_archive.py tests/test_core_phase3.py
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "::group::full failure summary"
-            python -m pytest -q --tb=line -m "not needs_pty" `
-              tests/test_fsops.py tests/test_archive.py tests/test_core_phase3.py 2>&1 |
-              Select-Object -Last 60
-            Write-Host "::endgroup::"
-          }
+            tests/test_fsops.py tests/test_archive.py tests/test_core_phase3.py *>&1 |
+            Tee-Object -FilePath "$env:RUNNER_TEMP\pytest-win.txt"
           exit $LASTEXITCODE
+
+      - name: Publish the pytest report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-pytest-report
+          path: ${{ runner.temp }}/pytest-win.txt
+          if-no-files-found: warn
+
+      - name: Fail the job if the tests failed
+        if: steps.tests.outcome == 'failure'
+        shell: pwsh
+        run: |
+          Write-Host "::error::unit tests failed - see the windows-pytest-report artifact"
+          exit 1
 
       - name: Smoke - does curses import and init under Windows?
         shell: pwsh
