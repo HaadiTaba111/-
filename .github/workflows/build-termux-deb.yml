@@ -12,6 +12,10 @@ on:
 permissions:
   contents: write
 
+defaults:
+  run:
+    working-directory: twin-pane-explorer
+
 jobs:
   deb:
     runs-on: ubuntu-latest
@@ -50,9 +54,9 @@ jobs:
         with:
           name: twinpane-termux
           path: |
-            dist/twinpane_*_all.deb
-            dist/twinpane-*.zip
-            dist/SHA256SUMS
+            twin-pane-explorer/dist/twinpane_*_all.deb
+            twin-pane-explorer/dist/twinpane-*.zip
+            twin-pane-explorer/dist/SHA256SUMS
           retention-days: 60
 
       - name: Attach to the release (tags only)
@@ -60,6 +64,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/twinpane_*_all.deb
-            dist/twinpane-*.zip
-            dist/SHA256SUMS
+            twin-pane-explorer/dist/twinpane_*_all.deb
+            twin-pane-explorer/dist/twinpane-*.zip
+            twin-pane-explorer/dist/SHA256SUMS

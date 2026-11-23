@@ -15,6 +15,10 @@ on:
 permissions:
   contents: write
 
+defaults:
+  run:
+    working-directory: twin-pane-explorer
+
 jobs:
   exe:
     runs-on: windows-latest
@@ -76,8 +80,8 @@ jobs:
         with:
           name: TwinPane-windows
           path: |
-            dist/TwinPane.exe
-            dist/TwinPane-windows.zip
+            twin-pane-explorer/dist/TwinPane.exe
+            twin-pane-explorer/dist/TwinPane-windows.zip
           retention-days: 30
 
       - name: Attach to the release (tags only)
@@ -85,5 +89,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/TwinPane.exe
-            dist/TwinPane-windows.zip
+            twin-pane-explorer/dist/TwinPane.exe
+            twin-pane-explorer/dist/TwinPane-windows.zip
