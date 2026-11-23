@@ -126,7 +126,7 @@ public class MainActivity extends Activity {
         // The Termux-free path, first on the screen on purpose: this is what
         // works even when the Termux handshake cannot.
         Button browse = new Button(this);
-        browse.setText("Browse phone files  (no Termux needed)");
+        browse.setText("Two panels  (copy & move files)");
         browse.setAllCaps(false);
         browse.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         browse.setTextColor(Color.parseColor("#0b1015"));
@@ -138,7 +138,7 @@ public class MainActivity extends Activity {
         browse.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                startActivity(new Intent(MainActivity.this, BrowserActivity.class));
+                startActivity(new Intent(MainActivity.this, TwinPaneActivity.class));
             }
         });
         root.addView(browse, new LinearLayout.LayoutParams(
@@ -166,6 +166,21 @@ public class MainActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT);
         launchParams.topMargin = dp(10);
         root.addView(launch, launchParams);
+
+        Button plainBrowse = new Button(this);
+        plainBrowse.setText("Single-panel browser");
+        plainBrowse.setAllCaps(false);
+        plainBrowse.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivity(new Intent(MainActivity.this, BrowserActivity.class));
+            }
+        });
+        LinearLayout.LayoutParams plainParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        plainParams.topMargin = dp(8);
+        root.addView(plainBrowse, plainParams);
 
         copy = new Button(this);
         copy.setText("Copy the command (paste in Termux)");
@@ -198,9 +213,8 @@ public class MainActivity extends Activity {
         root.addView(listing);
 
         TextView footer = mono();
-        footer.setText("The blue button always works.\n"
-                + "The green one needs Termux (F-Droid) — it is the "
-                + "two-panel terminal itself.");
+        footer.setText("The blue button always works — two panels, copy and move.\n"
+                + "The green one opens the same idea as a text terminal in Termux.");
         footer.setTextColor(Color.parseColor("#56606d"));
         footer.setGravity(Gravity.CENTER);
         footer.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
