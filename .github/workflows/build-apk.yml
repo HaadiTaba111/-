@@ -95,12 +95,17 @@ jobs:
           ./gradlew assembleRelease --no-daemon --stacktrace || true
 
       - name: Sign the release APK (only when a keystore secret exists)
-        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
         env:
           KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          if [ -z "$KEYSTORE" ]; then
+            echo "No signing keystore configured - shipping the debug APK."
+            echo "(add ANDROID_KEYSTORE_BASE64 / ANDROID_KEY_ALIAS /"
+            echo " ANDROID_KEY_PASSWORD secrets to sign a release build)"
+            exit 0
+          fi
           echo "$KEYSTORE" | base64 -d > /tmp/release.keystore
           SDK=$ANDROID_HOME/build-tools/34.0.0
           APK=android/app/build/outputs/apk/release/app-release-unsigned.apk
