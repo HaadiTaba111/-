@@ -37,8 +37,13 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up the Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Locate the Android SDK that ships with ubuntu-latest
+        run: |
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls -d "$ANDROID_HOME"/* 2>/dev/null | head -10 || true
+          ls "$ANDROID_HOME/build-tools" 2>/dev/null || echo "no build-tools yet"
+          ls "$ANDROID_HOME/platforms" 2>/dev/null || echo "no platforms yet"
 
       - name: Gradle cache
         uses: actions/cache@v4
