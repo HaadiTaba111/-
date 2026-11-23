@@ -170,8 +170,8 @@ class ActivityLog:
             for line in tb.splitlines():
                 self._write(self._error_path, "error", "    " + line)
             # keep a short marker in the activity log so the timeline is complete
-            self._write(self._activity_path, "error",
-                        "%-14s %s%s" % ("error", message, self._fmt(details)))
+            # (the level column already says ERROR - only pad the message)
+            self._write(self._activity_path, "error", message + self._fmt(details))
         else:
             self._write(self._error_path, "error", message + self._fmt(details))
 
