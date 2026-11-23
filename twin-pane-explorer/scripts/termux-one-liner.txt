@@ -1,0 +1,25 @@
+# Twin-Pane Explorer — نصب با یک دستور در Termux
+#
+# این فایل «متن» است، نه اسکریپت. یکی از خط‌های زیر را کامل کپی کن،
+# در Termux بچسبان و Enter بزن. همین. هیچ کار دیگری لازم نیست.
+#
+# ---------------------------------------------------------------- کوتاه‌ترین
+curl -fsSL https://raw.githubusercontent.com/HaadiTaba111/-/main/twin-pane-explorer/scripts/termux-install.sh | bash
+
+# ------------------------------------------------- اگر curl نداشتی (اولین بار)
+pkg install -y curl && curl -fsSL https://raw.githubusercontent.com/HaadiTaba111/-/main/twin-pane-explorer/scripts/termux-install.sh | bash
+
+# ------------------------------------------------------- بدون curl (با git)
+git clone --depth 1 https://github.com/HaadiTaba111/-.git ~/twinpane-src && bash ~/twinpane-src/twin-pane-explorer/scripts/termux-install.sh
+
+# -------------------------------------------------------------- فقط نصب، بدون اجرا
+curl -fsSL https://raw.githubusercontent.com/HaadiTaba111/-/main/twin-pane-explorer/scripts/termux-install.sh | bash -s -- --install
+
+# ---------------------------------------------------------------- عیب‌یابی
+curl -fsSL https://raw.githubusercontent.com/HaadiTaba111/-/main/twin-pane-explorer/scripts/termux-install.sh | bash -s -- --doctor
+
+# ------------------------------------------------------------------ نکته‌ها
+#  • اگر پرسید «Allow access to storage?» → Allow بزن.
+#  • بعدش هر وقت خواستی فقط بنویس:  twinpane
+#  • برای به‌روزرسانی:               twinpane-update   (یا همان دستور کوتاه‌ترین را دوباره بزن)
+#  • برای حذف:                       curl -fsSL ... | bash -s -- --uninstall
