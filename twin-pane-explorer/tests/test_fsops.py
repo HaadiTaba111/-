@@ -5,6 +5,13 @@ import sys
 
 import pytest
 
+# Symlinks and chmod are not usable for a normal user on Windows, and the file
+# manager's own code paths for them are POSIX-only, so those two tests are
+# skipped there (the rest of the suite still runs).
+needs_posix = pytest.mark.skipif(
+    os.name == "nt", reason="symlinks/chmod need POSIX or admin rights"
+)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from twinpane import fsops  # noqa: E402
@@ -97,6 +104,7 @@ def test_copy_file_and_dir(sandbox):
     assert (src / "notes.txt").exists()
 
 
+@needs_posix
 def test_copy_preserves_mode_and_symlink(sandbox):
     src, dst, _ = sandbox
     script = src / "run.sh"
@@ -247,6 +255,7 @@ def test_delete_readonly_dir(sandbox):
         os.chmod(ro, 0o755) if ro.exists() else None
 
 
+@needs_posix
 def test_mkdir_file_rename_chmod_symlink(sandbox):
     src, dst, _ = sandbox
     fsops.make_dir(str(src), "newdir")

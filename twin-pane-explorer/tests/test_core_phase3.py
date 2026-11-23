@@ -378,6 +378,14 @@ def test_param_setting_registers_new_key():
 # end-to-end: the real curses app, driven through a pty
 # ---------------------------------------------------------------------------
 
+# The end-to-end helpers below drive the real curses UI through a pty.
+# pexpect's spawn() needs forkpty, which Windows does not have - the unit tests
+# above still cover the logic there, so these are skipped on that platform.
+needs_pty = pytest.mark.skipif(
+    os.name == "nt",
+    reason="pexpect.spawn needs a POSIX pty; run the EXE build on Windows instead")
+
+
 def _app(tmp_path, keys, wait=1.8, args_extra=(), no_args=False):
     """Run the app in a pty with a private HOME, send keys, return the screen."""
     pexpect = pytest.importorskip("pexpect")
@@ -425,6 +433,7 @@ def _app(tmp_path, keys, wait=1.8, args_extra=(), no_args=False):
     return text, home
 
 
+@needs_pty
 def test_navigation_is_saved_to_the_session(tmp_path):
     _app(tmp_path, ["\r"], wait=2.0)          # enter 'docs'
     payload = json.loads((tmp_path / ".state" / "session.json")
@@ -433,6 +442,7 @@ def test_navigation_is_saved_to_the_session(tmp_path):
     assert payload["left"]["cursor"] == "a.txt"
 
 
+@needs_pty
 def test_second_run_resumes_the_saved_folder(tmp_path):
     _app(tmp_path, ["\r"], wait=2.0)                      # enter 'docs', quit
     text, _home = _app(tmp_path, [], no_args=True, wait=2.2)   # plain restart
@@ -440,12 +450,14 @@ def test_second_run_resumes_the_saved_folder(tmp_path):
     assert "docs" in text
 
 
+@needs_pty
 def test_explicit_folder_beats_the_session(tmp_path):
     _app(tmp_path, ["\r"], wait=2.0)                     # saves 'docs' as the left folder
     text, _home = _app(tmp_path, [], no_args=False, wait=2.0)
     assert "Resumed your last session" not in text       # -l/-r wins, no resume
 
 
+@needs_pty
 def test_daily_log_records_the_session(tmp_path):
     _app(tmp_path, ["\r", "\x1b[B"], wait=2.0)
     logs = list((tmp_path / ".state" / "logs").glob("activity-*.log"))
@@ -455,6 +467,7 @@ def test_daily_log_records_the_session(tmp_path):
     assert "cd" in body
 
 
+@needs_pty
 def test_theme_key_changes_the_theme_and_persists(tmp_path):
     _app(tmp_path, ["t"], wait=2.0)
     cfg = json.loads((tmp_path / ".config" / "config.json")
@@ -462,12 +475,14 @@ def test_theme_key_changes_the_theme_and_persists(tmp_path):
     assert cfg["ui.theme"] != "classic"
 
 
+@needs_pty
 def test_settings_screen_opens(tmp_path):
     text, _home = _app(tmp_path, ["S"], wait=2.0)
     assert "Settings" in text
     assert "ui.theme" in text or "theme" in text.lower()
 
 
+@needs_pty
 def test_log_viewer_shows_todays_lines(tmp_path):
     text, _home = _app(tmp_path, ["\r", "G"], wait=2.2)
     assert "session start" in text or "Log" in text
