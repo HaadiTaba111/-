@@ -35,10 +35,11 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install pyinstaller windows-curses pytest
 
-      - name: Unit tests (no UI)
+      - name: Unit tests (POSIX-only cases skipped)
         shell: pwsh
         run: |
-          python -m pytest -q tests/test_fsops.py tests/test_archive.py tests/test_core_phase3.py
+          python -m pytest -q -m "not needs_pty" `
+            tests/test_fsops.py tests/test_archive.py tests/test_core_phase3.py
 
       - name: Smoke - does curses import and init under Windows?
         shell: pwsh
