@@ -496,8 +496,12 @@ public class TwinPaneActivity extends Activity {
     }
 
     private void paintFocus() {
-        paintCard(top, top == active);
-        paintCard(bottom, bottom == active);
+        if (top.card != null) {
+            paintCard(top.card, top == active);
+        }
+        if (bottom.card != null) {
+            paintCard(bottom.card, bottom == active);
+        }
         boolean topActive = active == top;
         copyButton.setText(topActive ? "Copy ▼" : "Copy ▲");
         moveButton.setText(topActive ? "Move ▼" : "Move ▲");
