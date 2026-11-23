@@ -371,6 +371,20 @@ twinpane
 `Depends: python, ncurses-utils`، خودش را روی `$PREFIX/bin` نصب می‌کند و با
 `pkg uninstall twinpane` کامل پاک می‌شود.
 
+### آیکون روی صفحه‌ی خانه (بدون APK)
+
+`pkg install termux-widget` (از F-Droid) و بعد:
+
+```bash
+# install-termux.sh خودش این کار را می‌کند
+mkdir -p ~/.shortcuts && cp termux-widget.sh ~/.shortcuts/explorer.sh
+chmod +x ~/.shortcuts/explorer.sh
+```
+
+حالا نگه‌داشتن انگشت روی صفحه‌ی خانه → Widgets → **Termux:Widget** → `explorer`.
+یک تپ = باز شدن برنامه با پنل چپ `~` و راست `/sdcard` (یا `$HOME/storage/shared`).
+این نزدیک‌ترین چیز به «اپ» است بدون نیاز به SDK اندروید.
+
 ### چرا APK نه؟
 
 APK یک بسته‌ی امضاشده‌ی اندروید است و برای ساختنش SDK + build-tools (aapt2, d8,

@@ -1,28 +1,49 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # =============================================================================
-#  Optional: home-screen shortcut for Termux:Widget
+#  Home-screen shortcut: one tap opens Twin-Pane Explorer
 #
-#  Termux:Widget runs scripts from ~/.shortcuts/ with one tap on the home
-#  screen.  Copy this file there (install-termux.sh can do it for you):
+#  Two ways to get an icon (both work without root and without an APK):
 #
-#      mkdir -p ~/.shortcuts
-#      cp twin-pane-explorer/termux-widget.sh ~/.shortcuts/explorer.sh
-#      chmod +x ~/.shortcuts/explorer.sh
+#  A) Termux:Widget  (pkg install termux-widget - from F-Droid)
+#       mkdir -p ~/.shortcuts
+#       cp termux-widget.sh ~/.shortcuts/explorer.sh
+#       chmod +x ~/.shortcuts/explorer.sh
+#     then long-press the home screen -> Widgets -> Termux:Widget -> "explorer"
 #
-#  Then add the "Termux:Widget" widget on your launcher and pick "explorer".
-#  Note: widgets run in the background terminal; the best experience is the
-#  Termux "open new session" action, which this script requests itself.
+#  B) Termux:API "Termux:Tasker" style tile / Shortcuts app:
+#       ~/.shortcuts/tasks/ is used for background runs; this file is meant for
+#       ~/.shortcuts/ so it gets a foreground terminal.
+#
+#  Optional environment knobs:
+#     TWINPANE_RIGHT=/sdcard/Download   right panel folder
+#     TWINPANE_LEFT=~/Download          left panel folder
 # =============================================================================
-set -e
-APP_DIR="${TWINPANE_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-export PYTHONPATH="$APP_DIR${PYTHONPATH:+:$PYTHONPATH}"
+set -u
 
-# Ask Termux to run the UI in a foreground session so the keyboard works.
-if command -v termux-reload-settings >/dev/null 2>&1 && [ -z "$TWINPANE_IN_SESSION" ]; then
-    if command -v am >/dev/null 2>&1; then
-        # Fallback: run directly if am is unavailable.
-        :
+# Resolve the app folder: installed package first, then the script's own folder.
+APP_DIR="${TWINPANE_HOME:-}"
+if [ -z "$APP_DIR" ]; then
+    if [ -f "$PREFIX/lib/twinpane/run.py" ]; then
+        APP_DIR="$PREFIX/lib/twinpane"
+    else
+        APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     fi
 fi
 
-exec python3 -m twinpane -l "$HOME" -r "${TWINPANE_RIGHT:-/sdcard}" "$@"
+LEFT="${TWINPANE_LEFT:-$HOME}"
+RIGHT="${TWINPANE_RIGHT:-}"
+if [ -z "$RIGHT" ]; then
+    for candidate in /sdcard "$HOME/storage/shared" "$HOME/storage/downloads"; do
+        [ -d "$candidate" ] && RIGHT="$candidate" && break
+    done
+fi
+[ -z "$RIGHT" ] && RIGHT="$HOME"
+
+# A widget can fire before storage permission is granted; tell the user once.
+if [ "$RIGHT" = "$HOME" ] && [ ! -d "$HOME/storage" ]; then
+    echo "Tip: run 'termux-setup-storage' once to reach your phone storage."
+    sleep 2
+fi
+
+cd "$APP_DIR" || exit 1
+exec python -m twinpane -l "$LEFT" -r "$RIGHT" "$@"

@@ -49,7 +49,8 @@ install_source() {
     ( cd "$HERE" && tar -cf - \
         --exclude='__pycache__' --exclude='*.pyc' --exclude='.git' \
         --exclude='dist' --exclude='tests' --exclude='docs/preview' \
-        --exclude='.pytest_cache' run.py twinpane 2>/dev/null ) \
+        --exclude='.pytest_cache' run.py twinpane termux-widget.sh \
+        docs/termux.properties 2>/dev/null ) \
         | ( cd "$PREFIX/lib/$APP" && tar -xf - )
     cat > "$PREFIX/bin/$APP" <<EOF
 #!/data/data/com.termux/files/usr/bin/sh
@@ -82,18 +83,34 @@ storage() {
 keyboard() {
     # The extra-keys row makes F5/F6/F8 reachable on a phone soft keyboard.
     local props="$HOME/.termux/termux.properties"
-    if [ -f "$HERE/docs/termux.properties" ]; then
+    local src="$PREFIX/lib/$APP/docs/termux.properties"
+    [ -f "$src" ] || src="$HERE/docs/termux.properties"
+    if [ -f "$src" ]; then
         mkdir -p "$HOME/.termux"
         if grep -q 'Twin-Pane Explorer' "$props" 2>/dev/null; then
             say "Extra-keys already configured"
         else
             say "Adding Twin-Pane extra keys to $props"
             if [ -f "$props" ]; then cp "$props" "$props.bak.$$"; fi
-            cat "$HERE/docs/termux.properties" >> "$props"
+            cat "$src" >> "$props"
             command -v termux-reload-settings >/dev/null 2>&1 && \
                 termux-reload-settings || warn "Reopen Termux to load the extra keys."
         fi
     fi
+}
+
+shortcut() {
+    # One-tap home-screen icon via Termux:Widget (no APK needed)
+    local src="$PREFIX/lib/$APP/termux-widget.sh"
+    [ -f "$src" ] || src="$HERE/termux-widget.sh"
+    [ -f "$src" ] || return 0
+    mkdir -p "$HOME/.shortcuts"
+    cp "$src" "$HOME/.shortcuts/explorer.sh"
+    chmod 755 "$HOME/.shortcuts/explorer.sh"
+    if ! command -v termux-widget >/dev/null 2>&1; then
+        say "For a home-screen icon: pkg install termux-widget (F-Droid app)"
+    fi
+    say "Shortcut installed: ~/.shortcuts/explorer.sh"
 }
 
 selftest() {
@@ -125,7 +142,7 @@ main() {
         --uninstall) uninstall ;;
         --deb)       need_termux; bootstrap; install_deb ;;
         --help|-h)   sed -n '2,12p' "$0"; exit 0 ;;
-        *)           need_termux; bootstrap; storage; install_source; keyboard ;;
+        *)           need_termux; bootstrap; storage; install_source; keyboard; shortcut ;;
     esac
     selftest
     say "Done. Start it with:  twinpane"

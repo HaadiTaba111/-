@@ -81,6 +81,8 @@ def build_deb(ver: str, output: str) -> str:
             src = os.path.join(ROOT, rel)
             if rel.startswith("tests/") or rel.startswith("tools_"):
                 continue
+            if os.path.basename(rel) == ".gitignore":
+                continue
             dest = os.path.join(lib, rel)
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             shutil.copy2(src, dest)
