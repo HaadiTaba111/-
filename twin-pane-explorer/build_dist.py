@@ -160,6 +160,145 @@ def _build_ar_deb(stage: str, target: str, ver: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# single-file portable app (one file to copy to the phone)
+# ---------------------------------------------------------------------------
+
+STUB = r'''#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Twin-Pane Explorer __VER__ - single-file edition.
+
+Copy THIS ONE FILE anywhere (USB, Telegram, email, cloud) and run it:
+
+    python twinpane-__VER__-standalone.py            # run straight away
+    python twinpane-__VER__-standalone.py --install  # add a `twinpane` command
+    python twinpane-__VER__-standalone.py --version
+    python twinpane-__VER__-standalone.py --uninstall
+
+Everything the program needs is inside this file (a base64 zip payload), so
+there is nothing to unzip and nothing to download.
+"""
+import base64
+import os
+import shutil
+import sys
+import tempfile
+import zipfile
+
+VERSION = "__VER__"
+PAYLOAD = """\
+__PAYLOAD__"""
+
+
+def _extract():
+    """Unpack the payload once into a per-version cache folder."""
+    base = os.environ.get("TWINPANE_CACHE") or os.path.join(
+        tempfile.gettempdir(), "twinpane-" + VERSION)
+    marker = os.path.join(base, "twinpane", "ui.py")
+    if os.path.exists(marker):
+        return base
+    os.makedirs(base, exist_ok=True)
+    raw = base64.b64decode(PAYLOAD)
+    with tempfile.TemporaryFile() as handle:
+        handle.write(raw)
+        handle.seek(0)
+        with zipfile.ZipFile(handle) as archive:
+            archive.extractall(base)
+    return base
+
+
+def _install():
+    prefix = os.environ.get("PREFIX")
+    if not prefix:
+        print("PREFIX is not set - run this inside Termux.")
+        return 2
+    root = _extract()
+    dest = os.path.join(prefix, "lib", "twinpane")
+    shutil.rmtree(dest, ignore_errors=True)
+    shutil.copytree(os.path.join(root, "twinpane"),
+                    os.path.join(dest, "twinpane"))
+    for name in ("run.py", "termux-widget.sh"):
+        src = os.path.join(root, name)
+        if os.path.exists(src):
+            shutil.copy2(src, os.path.join(dest, name))
+    binary = os.path.join(prefix, "bin", "twinpane")
+    os.makedirs(os.path.dirname(binary), exist_ok=True)
+    with open(binary, "w") as handle:
+        handle.write("#!/data/data/com.termux/files/usr/bin/sh\n")
+        handle.write('exec python "' + dest + '/run.py" "$@"\n')
+    os.chmod(binary, 0o755)
+    shortcuts = os.path.expanduser("~/.shortcuts")
+    os.makedirs(shortcuts, exist_ok=True)
+    widget = os.path.join(dest, "termux-widget.sh")
+    if os.path.exists(widget):
+        target = os.path.join(shortcuts, "explorer.sh")
+        shutil.copy2(widget, target)
+        os.chmod(target, 0o755)
+        print("Home-screen shortcut: ~/.shortcuts/explorer.sh")
+        print("  (pkg install termux-widget, then add the Termux:Widget widget)")
+    print("Installed. Start it with:  twinpane")
+    return 0
+
+
+def _uninstall():
+    prefix = os.environ.get("PREFIX", "")
+    shutil.rmtree(os.path.join(prefix, "lib", "twinpane"), ignore_errors=True)
+    try:
+        os.unlink(os.path.join(prefix, "bin", "twinpane"))
+    except OSError:
+        pass
+    print("Removed.")
+    return 0
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv and argv[0] == "--install":
+        return _install()
+    if argv and argv[0] == "--uninstall":
+        return _uninstall()
+    if argv and argv[0] in ("--version", "-V"):
+        print("twinpane " + VERSION + " (standalone)")
+        return 0
+    root = _extract()
+    os.environ.setdefault("PYTHONPATH", root)
+    sys.path.insert(0, root)
+    from twinpane.ui import main as run
+    return run(argv)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+
+def build_standalone(ver: str, output: str) -> str:
+    """One file to copy to the phone - no unzip, no git, no internet."""
+    import base64
+    os.makedirs(DIST, exist_ok=True)
+    target = os.path.join(DIST, output)
+    buffer = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    buffer.close()
+    try:
+        with zipfile.ZipFile(buffer.name, "w", zipfile.ZIP_DEFLATED) as zf:
+            for rel in iter_sources():
+                if rel.startswith(("dist/", "tests/", "docs/preview/")) or \
+                        rel in ("build_dist.py", "tools_render.py",
+                                "build-exe.bat", "TwinPane.bat", "README.md"):
+                    continue
+                zf.write(os.path.join(ROOT, rel), rel)
+        with open(buffer.name, "rb") as handle:
+            encoded = base64.encodebytes(handle.read()).decode("ascii")
+        body = (STUB.replace("__VER__", ver)
+                .replace("__PAYLOAD__", encoded))
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        os.chmod(target, 0o755)
+        return target
+    finally:
+        os.unlink(buffer.name)
+
+
+# ---------------------------------------------------------------------------
 # portable zip
 # ---------------------------------------------------------------------------
 
@@ -218,7 +357,10 @@ def main() -> int:
     zipped = build_zip(ver, "twinpane-%s.zip" % ver)
     print("  zip :", os.path.relpath(zipped, ROOT),
           "%.1f KB" % (os.path.getsize(zipped) / 1024))
-    print(checksums([deb, zipped]), end="")
+    standalone = build_standalone(ver, "twinpane-%s-standalone.py" % ver)
+    print("  one file:", os.path.relpath(standalone, ROOT),
+          "%.1f KB" % (os.path.getsize(standalone) / 1024))
+    print(checksums([deb, zipped, standalone]), end="")
     return 0
 
 

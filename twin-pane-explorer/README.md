@@ -45,6 +45,9 @@ Tab=switch  c/F5=copy  m/F6=move  F7=new  F8=delete  F10=quit   |   selected: 2
 - **آشتی با صفحه‌کلید اندروید**: کلیدهای جهت‌دار در هر دو حالت terminfo (normal / application) کار می‌کنند
 - **هر عملیاتی که `cp -r` و `mv` و `rm -rf` می‌دهند** با تاییدیه و گزارش خطای per-file
 
+> **دنبال «چطور نصب کنم؟» هستید؟** → [`docs/HOW-TO-RUN-FA.md`](docs/HOW-TO-RUN-FA.md)
+> — سه راه با مثال، و توضیح کامل اینکه چرا APK نمی‌سازیم.
+
 ## نصب در Termux (سه خط)
 
 ```bash
@@ -60,6 +63,23 @@ pkg install ./dist/twinpane_1.1.0_all.deb
 `install-termux.sh` خودش python و ncurses را نصب می‌کند، کلیدهای اضافه‌ی Termux را
 اضافه می‌کند و در پایان یک **self-test** (ساخت zip و استخراج) می‌گیرد.
 برای حذف: `bash install-termux.sh --uninstall`.
+
+### ساده‌ترین راه: یک فایل، بدون نصب
+
+```bash
+python build_dist.py     # می‌سازد: dist/twinpane-1.1.0-standalone.py  (۸۳KB)
+```
+
+همان یک فایل را به گوشی بفرستید (تلگرام، USB، ایمیل، هر چیزی) و:
+
+```bash
+pkg install python && termux-setup-storage
+python twinpane-1.1.0-standalone.py            # اجرا
+python twinpane-1.1.0-standalone.py --install  # یا: نصب دستور twinpane
+```
+
+هیچ چیز دیگری لازم نیست — نه git، نه اینترنت، نه unzip. کل برنامه (base64)
+داخل همان یک فایل است.
 
 سپس:
 
