@@ -104,8 +104,29 @@ jobs:
 
       - name: Build debug APK
         run: |
+          set -o pipefail
           cd android
-          ./gradlew assembleDebug --no-daemon --stacktrace
+          # Pipe through tee so javac diagnostics also land in a file we can
+          # re-emit as a workflow annotation (log downloads are not always
+          # reachable from a phone or a restricted network).
+          if ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/build.log; then
+            exit 0
+          fi
+          echo "--- javac diagnostics ---"
+          grep -E "error:|warning:|symbol:|location:|required:|found:" /tmp/build.log | head -60 || true
+          # Emit each .java:<line>: error plus the two following diagnostic lines
+          # as an annotation, so the message survives without a log download.
+          awk '
+            match($0, /^[^ ]*\.java:[0-9]+: error: /) {
+              msg = $0
+              getline nxt
+              sub(/%/, "%25", msg); sub(/\r/, "", msg)
+              printf "%s || %s\n", msg, nxt
+            }
+          ' /tmp/build.log | head -20 | while IFS= read -r line; do
+              echo "::error title=javac::$(printf '%s' "$line" | sed 's/%/%25/g; s/\r//g')"
+          done
+          exit 1
 
       - name: Build release APK (unsigned if no keystore)
         run: |
@@ -130,17 +151,17 @@ jobs:
           $SDK/zipalign -f 4 "$APK" /tmp/aligned.apk
           $SDK/apksigner sign --ks /tmp/release.keystore \
             --ks-key-alias "$KEY_ALIAS" --ks-pass "pass:$KEY_PASS" \
-            --out dist/twinpane-1.1.0.apk /tmp/aligned.apk
-          $SDK/apksigner verify --print-certs dist/twinpane-1.1.0.apk
+            --out dist/twinpane-1.1.1.apk /tmp/aligned.apk
+          $SDK/apksigner verify --print-certs dist/twinpane-1.1.1.apk
 
       - name: Collect artefacts
         run: |
           mkdir -p dist
           cp android/app/build/outputs/apk/debug/app-debug.apk \
-             dist/twinpane-1.1.0-debug.apk
+             dist/twinpane-1.1.1-debug.apk
           if [ -f android/app/build/outputs/apk/release/app-release.apk ]; then
             cp android/app/build/outputs/apk/release/app-release.apk \
-               dist/twinpane-1.1.0.apk
+               dist/twinpane-1.1.1.apk
           fi
           ls -lh dist/*.apk
           sha256sum dist/*.apk > dist/APK-SHA256SUMS || true

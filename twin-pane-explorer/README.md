@@ -46,38 +46,50 @@ Tab=switch  c/F5=copy  m/F6=move  F7=new  F8=delete  F10=quit   |   selected: 2
 - **هر عملیاتی که `cp -r` و `mv` و `rm -rf` می‌دهند** با تاییدیه و گزارش خطای per-file
 
 > **دانلود آماده (APK · EXE · deb · zip):**
-> [Releases v1.1.0](https://github.com/HaadiTaba111/-/releases/tag/v1.1.0)
+> [Releases v1.1.1](https://github.com/HaadiTaba111/-/releases/tag/v1.1.1)
 >
 > **راهنمای نصب قدم‌به‌قدم:** [`docs/HOW-TO-RUN-FA.md`](docs/HOW-TO-RUN-FA.md)
 
-## نصب در Termux (سه خط)
+## نصب در Termux — یک دستور، همه‌چیز
 
 ```bash
-pkg install python termux-tools      # اگر نصب نیست
-termux-setup-storage                 # یک بار، برای دسترسی به /sdcard (Allow بزنید)
-cd twin-pane-explorer && bash install-termux.sh
-
-# یا نصب از پکیج آماده (بدون کپی سورس):
-python build_dist.py                 # dist/twinpane_1.1.0_all.deb می‌سازد
-pkg install ./dist/twinpane_1.1.0_all.deb
+curl -fsSL https://raw.githubusercontent.com/HaadiTaba111/-/main/twin-pane-explorer/scripts/termux-install.sh | bash
 ```
 
-`install-termux.sh` خودش python و ncurses را نصب می‌کند، کلیدهای اضافه‌ی Termux را
-اضافه می‌کند و در پایان یک **self-test** (ساخت zip و استخراج) می‌گیرد.
-برای حذف: `bash install-termux.sh --uninstall`.
+کلون → نصب وابستگی‌ها → دسترسی حافظه → نصب در `$PREFIX` → تست → **اجرا**.
+از آن به بعد فقط `twinpane`.
+
+بدون `curl`:
+
+```bash
+git clone --depth 1 https://github.com/HaadiTaba111/-.git ~/twinpane-src \
+  && bash ~/twinpane-src/twin-pane-explorer/scripts/termux-install.sh
+```
+
+گزینه‌ها: `--install` · `--update` · `--run` · `--doctor` · `--uninstall`
+
+```bash
+# یا نصب از پکیج آماده (بدون کپی سورس):
+python build_dist.py                 # dist/twinpane_1.1.1_all.deb می‌سازد
+pkg install ./dist/twinpane_1.1.1_all.deb
+```
+
+`scripts/termux-install.sh` خودش python و ncurses را نصب می‌کند، `termux-setup-storage`
+را صدا می‌زند و در پایان یک **self-test** واقعی (ساخت zip و استخراج) می‌گیرد.
+برای حذف: `... | bash -s -- --uninstall`.
 
 ### ساده‌ترین راه: یک فایل، بدون نصب
 
 ```bash
-python build_dist.py     # می‌سازد: dist/twinpane-1.1.0-standalone.py  (۸۳KB)
+python build_dist.py     # می‌سازد: dist/twinpane-1.1.1-standalone.py  
 ```
 
 همان یک فایل را به گوشی بفرستید (تلگرام، USB، ایمیل، هر چیزی) و:
 
 ```bash
 pkg install python && termux-setup-storage
-python twinpane-1.1.0-standalone.py            # اجرا
-python twinpane-1.1.0-standalone.py --install  # یا: نصب دستور twinpane
+python twinpane-1.1.1-standalone.py            # اجرا
+python twinpane-1.1.1-standalone.py --install  # یا: نصب دستور twinpane
 ```
 
 هیچ چیز دیگری لازم نیست — نه git، نه اینترنت، نه unzip. کل برنامه (base64)
@@ -269,7 +281,7 @@ ls ~/.local/state/twinpane/logs/
 ```
 
 ```
-2026-11-23 06:58:00 INFO  --- session start ---  version=1.1.0 left=~ right=/sdcard theme=gruvbox
+2026-11-23 06:58:00 INFO  --- session start ---  version=1.1.1 left=~ right=/sdcard theme=gruvbox
 2026-11-23 06:58:01 INFO  cd             /sdcard/DCIM  from_=/sdcard
 2026-11-23 06:58:04 INFO  copy           /sdcard/DCIM/photo.jpg  dest=~  files=1 bytes=890000 seconds=0.12
 2026-11-23 06:58:09 INFO  archive        ~/photos.zip  sources=1 files=1 bytes=890000
@@ -384,8 +396,8 @@ def register(api):
 ### Termux (روش واقعی روی گوشی)
 
 ```bash
-python build_dist.py                 # dist/twinpane_1.1.0_all.deb + zip + SHA256SUMS
-pkg install ./dist/twinpane_1.1.0_all.deb
+python build_dist.py                 # dist/twinpane_1.1.1_all.deb + zip + SHA256SUMS
+pkg install ./dist/twinpane_1.1.1_all.deb
 twinpane
 ```
 
@@ -409,17 +421,28 @@ chmod +x ~/.shortcuts/explorer.sh
 
 ### APK اندروید
 
-**ساخته می‌شود و آماده است:** `twinpane-1.1.0-debug.apk` در
-[Releases](https://github.com/HaadiTaba111/-/releases/tag/v1.1.0).
+**ساخته می‌شود و آماده است:** `twinpane-1.1.1-debug.apk` در
+[Releases](https://github.com/HaadiTaba111/-/releases/tag/v1.1.1).
 
-`android/` یک اپ Gradle است که سه کار می‌کند: Termux را پیدا می‌کند، اجازه‌ی
-`RUN_COMMAND` را می‌گیرد، و فایل پایتونِ داخل خودش را در Termux نصب و اجرا می‌کند.
-یعنی APK = **آیکون + سیم‌کشی**، و موتور اصلی همان برنامه‌ی curses است.
+نسخه‌ی **1.1.1** دو نیمه دارد:
 
-**چرا لانچر و نه رابط بومی؟** یک برنامه‌ی curses به ترمینال نیاز دارد و اندروید
-ترمینال ندارد. هر APKای که یک TUI را «واقعاً» داخل خودش اجرا کند، در عمل یک
-شبیه‌ساز ترمینال ۵۰–۸۰ مگابایتی است. این APK ۲۳۵ کیلوبایت است و از ترمینال
-واقعی Termux استفاده می‌کند.
+**۱) مرورگر فایل بومی — مستقل از Termux.** دکمه‌ی آبی روی صفحه‌ی اول.
+`BrowserActivity` با `ListView` خالص (بدون AndroidX) پوشه‌های گوشی را لیست می‌کند:
+`/sdcard`، Downloads، DCIM، Pictures، Music، Documents، `Android/data`.
+فولدرها اول، اندازه و تاریخ، پیش‌نمایش فایل متنی، نصب `.apk`، حذف با long-press.
+دسترسی: `READ_EXTERNAL_STORAGE` تا API 32، `requestLegacyExternalStorage` برای
+API 29، و `MANAGE_EXTERNAL_STORAGE` برای API 30+ (یک تپ، و اگر ندهی نوار پایین
+دقیقاً می‌گوید چه کار کنی — به‌جای لیست خالی).
+
+**۲) راه‌انداز ترمکس.** دکمه‌ی سبز. `RUN_COMMAND` را از **Service** صدا می‌زند
+(نسخه‌ی 1.1.0 اشتباهاً `startActivity` می‌زد، و ترمکس دستور را اجرا نمی‌کرد —
+همین دلیل «هیچ اتفاقی نیفتاد» بود). payload را در `/sdcard/Download/TwinPane/`
+می‌گذارد که ترمکس بتواند بخواندش (مسیر قبلی `/data/data/...` خصوصی بود).
+
+**چرا TUI داخل APK اجرا نمی‌شود؟** یک برنامه‌ی curses به ترمینال نیاز دارد و
+اندروید ترمینال ندارد. هر APKای که یک TUI را «واقعاً» داخل خودش اجرا کند، در عمل
+یک شبیه‌ساز ترمینال ۵۰–۸۰ مگابایتی است. این APK ۲۳۵ کیلوبایت است و از ترمینال
+واقعی Termux استفاده می‌کند — و برای وقتی که Termux نیست، مرورگر بومی خودش را دارد.
 
 ```bash
 # ساخت مجدد (روی هر ماشینی با JDK 17 + Android SDK):
@@ -429,13 +452,13 @@ python build_dist.py && python build_apk.py
 gh workflow run build-apk.yml --ref main
 ```
 
-نصب: APK را باز کنید → اگر Termux نبود لینک F-Droid می‌دهد → Allow → برنامه باز می‌شود.
+نصب: APK را باز کنید → دکمه‌ی آبی فوراً پوشه‌ها را نشان می‌دهد؛ برای TUI دکمه‌ی سبز.
 برای امضای release، سه secret بگذارید: `ANDROID_KEYSTORE_BASE64`،
 `ANDROID_KEY_ALIAS`، `ANDROID_KEY_PASSWORD`.
 
 ### ویندوز — `TwinPane.exe` (ساخته شد)
 
-**دانلود:** `TwinPane.exe` (۸.۶MB) در [Releases](https://github.com/HaadiTaba111/-/releases/tag/v1.1.0).
+**دانلود:** `TwinPane.exe` (۸.۶MB) در [Releases](https://github.com/HaadiTaba111/-/releases/tag/v1.1.1).
 دوبار کلیک = اجرا. کد قابل‌حمل است: `pwd`/`grp`/`termios` همه اختیاری شده‌اند و
 `windows-curses` فقط برای رابط لازم است.
 
@@ -451,7 +474,7 @@ dist\TwinPane.exe
 بچسباند —
 
 ```bash
-git tag v1.1.0 && git push origin v1.1.0
+git tag v1.1.1 && git push origin v1.1.1
 ```
 
 خروجی: `TwinPane.exe` + `TwinPane-windows.zip` در تب Actions/Releases.
