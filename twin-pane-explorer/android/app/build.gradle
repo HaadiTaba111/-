@@ -1,0 +1,40 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.twinpane.explorer'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.twinpane.explorer"
+        minSdk 21
+        targetSdk 34
+        versionCode 1
+        versionName "1.1.0"
+    }
+
+    // The Python program is embedded as an asset so the APK is self-contained.
+    // build_dist_run.py drops twinpane-<ver>-standalone.py into src/main/assets.
+    sourceSets {
+        main { assets.srcDirs = ['src/main/assets'] }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // signed by the CI workflow when a keystore is available
+        }
+        debug {
+            applicationIdSuffix ""
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}

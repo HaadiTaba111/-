@@ -1,0 +1,5 @@
+// Top-level build. Everything the app needs ships with the Android SDK image
+// that GitHub's ubuntu-latest runner already has.
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}

@@ -1,0 +1,151 @@
+name: Build Android APK
+
+# Real, installable APK.  ubuntu-latest ships the Android SDK + JDK, which is
+# exactly what is missing from the dev sandbox - so the build runs here.
+#
+# The APK is a launcher: it embeds the single-file Python build, installs it
+# into Termux on first run and hands over the terminal.  A curses TUI needs a
+# real terminal, and on Android that terminal is Termux.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+    paths:
+      - "twin-pane-explorer/**"
+      - ".github/workflows/build-apk.yml"
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    working-directory: twin-pane-explorer
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Gradle cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('twin-pane-explorer/android/**/*.gradle') }}
+
+      - name: Lint + unit tests
+        run: |
+          python -m pip install --upgrade pip pytest pexpect pyte pyflakes
+          python -m pyflakes twinpane tests build_dist.py build_apk.py
+          python -m pytest -q tests/test_fsops.py tests/test_archive.py \
+                            tests/test_core_phase3.py
+
+      - name: Build the single-file payload
+        run: python build_dist.py
+
+      - name: Stage the assets + verify
+        run: |
+          python build_apk.py --prepare-only
+          ls -l android/app/src/main/assets/
+          python - <<'PY'
+          import base64, io, zipfile, pathlib
+          p = pathlib.Path("android/app/src/main/assets/twinpane-standalone.py")
+          text = p.read_text()
+          payload = text.split('PAYLOAD = """\\\n', 1)[1].split('"""', 1)[0]
+          data = base64.b64decode(payload)
+          names = zipfile.ZipFile(io.BytesIO(data)).namelist()
+          assert any(n.endswith("twinpane/ui.py") for n in names), names[:5]
+          print("payload ok:", len(data), "bytes,", len(names), "files")
+          PY
+
+      - name: Gradle wrapper
+        run: |
+          if [ ! -f android/gradlew ]; then
+            mkdir -p /tmp/wrap && cd /tmp/wrap
+            curl -sSL -o gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+            unzip -q gradle.zip
+            cd "$GITHUB_WORKSPACE/twin-pane-explorer/android"
+            /tmp/wrap/gradle-8.7/bin/gradle wrapper --gradle-version 8.7
+          fi
+          chmod +x android/gradlew
+
+      - name: Build debug APK
+        run: |
+          cd android
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Build release APK (unsigned if no keystore)
+        run: |
+          cd android
+          ./gradlew assembleRelease --no-daemon --stacktrace || true
+
+      - name: Sign the release APK (only when a keystore secret exists)
+        if: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "$KEYSTORE" | base64 -d > /tmp/release.keystore
+          SDK=$ANDROID_HOME/build-tools/34.0.0
+          APK=android/app/build/outputs/apk/release/app-release-unsigned.apk
+          $SDK/zipalign -f 4 "$APK" /tmp/aligned.apk
+          $SDK/apksigner sign --ks /tmp/release.keystore \
+            --ks-key-alias "$KEY_ALIAS" --ks-pass "pass:$KEY_PASS" \
+            --out dist/twinpane-1.1.0.apk /tmp/aligned.apk
+          $SDK/apksigner verify --print-certs dist/twinpane-1.1.0.apk
+
+      - name: Collect artefacts
+        run: |
+          mkdir -p dist
+          cp android/app/build/outputs/apk/debug/app-debug.apk \
+             dist/twinpane-1.1.0-debug.apk
+          if [ -f android/app/build/outputs/apk/release/app-release.apk ]; then
+            cp android/app/build/outputs/apk/release/app-release.apk \
+               dist/twinpane-1.1.0.apk
+          fi
+          ls -lh dist/*.apk
+          sha256sum dist/*.apk > dist/APK-SHA256SUMS || true
+
+      - name: Verify the APK is well formed
+        run: |
+          APK=$(ls dist/*.apk | head -1)
+          echo "== contents =="
+          unzip -l "$APK" | head -20
+          unzip -l "$APK" | grep -q "classes.dex" || { echo "no classes.dex"; exit 1; }
+          unzip -l "$APK" | grep -q "assets/twinpane-standalone.py" || {
+            echo "payload missing from APK"; exit 1; }
+          echo "== manifest =="
+          $ANDROID_HOME/build-tools/34.0.0/aapt2 dump badging "$APK" | head -12
+          echo "APK looks valid"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: twinpane-apk
+          path: |
+            twin-pane-explorer/dist/*.apk
+            twin-pane-explorer/dist/APK-SHA256SUMS
+          retention-days: 90
+
+      - name: Attach to the release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            twin-pane-explorer/dist/*.apk
+            twin-pane-explorer/dist/APK-SHA256SUMS
