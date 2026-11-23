@@ -1,19 +1,25 @@
-// Twin-Pane, on the phone, with two real panels.
+// Twin-Pane on the phone: two panels, stacked, either of which can be the
+// phone's storage or the Termux home directory.
 //
-// The whole point: two lists stacked top/bottom (a phone is tall, not wide),
-// each with its own folder, its own multi-selection, and Copy/Move from the
-// active panel into the *other* panel's folder. Everything here works on plain
-// local paths, so it needs no Termux at all - which is exactly what makes it
-// dependable. A Termux home directory can be opened in either panel the moment
-// the OS lets the app read it.
+// Why two engines
+// ---------------
+// This app can only see /sdcard. Termux can see /sdcard *and* its own home.
+// So:
 //
-// Interaction model (deliberately simple, matching how a phone is used):
-//   * tap a row            -> tick / untick it (files and folders alike)
-//   * tap the "›" on a row -> walk into that folder
-//   * tap a path bar       -> type any path directly
-//   * tap the other panel  -> make it the active one
-//   * Copy / Move          -> take everything ticked and write it into the
-//                             folder the other panel is showing
+//   local -> local     handled here, in Java (works with no Termux at all)
+//   anything + Termux  handed to the worker in Termux through TermuxBridge
+//
+// That split is deliberate: the dependable path never depends on Termux, and
+// the powerful path says plainly when Termux is not answering instead of
+// pretending a transfer happened.
+//
+// Interaction (a phone, not a keyboard):
+//   tap a row            tick / untick
+//   tap a row's "›"      open that folder
+//   tap a path bar       type any path
+//   tap the other panel  make it active
+//   tap Termux / Phone   switch what this panel is showing
+//   Copy / Move          write everything ticked into the other panel's folder
 package com.twinpane.explorer;
 
 import android.app.Activity;
@@ -60,21 +66,48 @@ public class TwinPaneActivity extends Activity {
 
     private static final int REQUEST_STORAGE = 21;
 
-    private static final int CONFLICT_ASK = 0;
+    // ══════════════════════════════════════════════════════════════════ model
 
-    // ── one panel ────────────────────────────────────────────────────────────
+    /** One visible row, whichever engine produced it. */
+    private static class Row {
+        final String name;
+        final String path;
+        final boolean dir;
+        final long size;
+        final long mtime;
+
+        Row(String name, String path, boolean dir, long size, long mtime) {
+            this.name = name;
+            this.path = path;
+            this.dir = dir;
+            this.size = size;
+            this.mtime = mtime;
+        }
+    }
+
     private class Panel {
         final boolean isTop;
-        File dir;
-        final List<File> entries = new ArrayList<>();
+        /** True when this panel is showing Termux's own filesystem. */
+        boolean termux;
+        /** Current folder, as a real path for local and a guest path for Termux. */
+        String path;
+        final List<Row> rows = new ArrayList<>();
         final Set<String> selected = new LinkedHashSet<>();
+        /** Local folders only: lets the cheap Java engine do the work. */
+        File dir;
+
         ListView list;
         TextView pathLabel;
+        TextView modeLabel;
         LinearLayout card;
         RowAdapter adapter;
 
         Panel(boolean isTop) {
             this.isTop = isTop;
+        }
+
+        boolean isLocal() {
+            return !termux;
         }
     }
 
@@ -85,11 +118,10 @@ public class TwinPaneActivity extends Activity {
     private Button moveButton;
     private TextView statusLabel;
 
-    /** Set while a transfer runs, so Cancel and re-entry stay predictable. */
-    private volatile boolean transferRunning;
-    private volatile boolean transferCancelled;
-    private AlertDialog transferDialog;
-    private TextView transferText;
+    private volatile boolean busy;
+    private volatile boolean cancelled;
+    private AlertDialog progressDialog;
+    private TextView progressText;
 
     private boolean warnedAboutStorage;
 
@@ -104,14 +136,10 @@ public class TwinPaneActivity extends Activity {
         setContentView(buildUi());
 
         File start = firstReadable(startCandidates());
-        // Both panels start in the same place: the phone's storage. One tap on
-        // a folder's ">" and they are two different folders, which is the
-        // moment Copy/Move becomes useful.
-        top.dir = start;
-        bottom.dir = start;
-        refresh(top);
-        refresh(bottom);
+        setLocal(top, start);
+        setLocal(bottom, start);
         focus(top);
+        refreshWorkerState();
     }
 
     private View buildUi() {
@@ -119,15 +147,13 @@ public class TwinPaneActivity extends Activity {
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.parseColor("#0b1015"));
 
-        root.addView(buildPanelHeader(top), new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(buildPanelHeader(top), wrap());
         root.addView(buildList(top), new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         root.addView(buildActionBar());
 
-        root.addView(buildPanelHeader(bottom), new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        root.addView(buildPanelHeader(bottom), wrap());
         root.addView(buildList(bottom), new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
@@ -137,25 +163,46 @@ public class TwinPaneActivity extends Activity {
         statusLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f);
         statusLabel.setPadding(dp(10), dp(5), dp(10), dp(5));
         statusLabel.setBackgroundColor(Color.parseColor("#131a22"));
-        statusLabel.setText(" tap = tick ·  ›  = open folder · tap a panel to make it active");
+        statusLabel.setText(" tap = tick ·  ›  = open · tap the other panel to send files there");
         root.addView(statusLabel);
         return root;
     }
 
+    private LinearLayout.LayoutParams wrap() {
+        return new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+    }
+
     private View buildPanelHeader(final Panel panel) {
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        panel.card = column;
+
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setPadding(dp(4), dp(5), dp(4), dp(5));
+        bar.setPadding(dp(4), dp(4), dp(4), dp(2));
 
-        panel.card = bar;
+        panel.modeLabel = new TextView(this);
+        panel.modeLabel.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        panel.modeLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f);
+        panel.modeLabel.setPadding(dp(6), dp(4), dp(8), dp(4));
+        panel.modeLabel.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                focus(panel);
+                chooseSource(panel);
+            }
+        });
+        bar.addView(panel.modeLabel);
 
         panel.pathLabel = new TextView(this);
         panel.pathLabel.setTypeface(Typeface.MONOSPACE);
         panel.pathLabel.setTextColor(Color.parseColor("#9ecbff"));
-        panel.pathLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f);
+        panel.pathLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f);
         panel.pathLabel.setSingleLine(true);
-        panel.pathLabel.setPadding(dp(4), dp(4), dp(4), dp(4));
+        panel.pathLabel.setPadding(dp(2), dp(4), dp(2), dp(4));
         panel.pathLabel.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -163,9 +210,8 @@ public class TwinPaneActivity extends Activity {
                 editPath(panel);
             }
         });
-        LinearLayout.LayoutParams pathParams = new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        bar.addView(panel.pathLabel, pathParams);
+        bar.addView(panel.pathLabel, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         TextView up = tinyButton("↑");
         up.setOnClickListener(new View.OnClickListener() {
@@ -186,7 +232,9 @@ public class TwinPaneActivity extends Activity {
             }
         });
         bar.addView(jump);
-        return bar;
+
+        column.addView(bar, wrap());
+        return column;
     }
 
     private View buildList(final Panel panel) {
@@ -270,7 +318,7 @@ public class TwinPaneActivity extends Activity {
         Button button = new Button(this);
         button.setText(label);
         button.setAllCaps(false);
-        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
+        button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
         button.setTextColor(Color.parseColor(color));
         GradientDrawable background = new GradientDrawable();
         background.setColor(Color.parseColor("#1d2733"));
@@ -283,16 +331,17 @@ public class TwinPaneActivity extends Activity {
     private TextView tinyButton(String label) {
         TextView view = new TextView(this);
         view.setText(label);
-        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         view.setTextColor(Color.parseColor("#7ee787"));
         view.setGravity(Gravity.CENTER);
         GradientDrawable background = new GradientDrawable();
         background.setColor(Color.parseColor("#1d2733"));
         background.setCornerRadius(dp(7));
         view.setBackground(background);
-        view.setPadding(dp(11), dp(3), dp(11), dp(5));
+        view.setPadding(dp(10), dp(3), dp(10), dp(5));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
         params.leftMargin = dp(4);
         view.setLayoutParams(params);
         return view;
@@ -308,7 +357,6 @@ public class TwinPaneActivity extends Activity {
 
     // ══════════════════════════════════════════════════════════════════ rows
 
-    /** Draws one row: a tick, the name, a size/date line, and "›" for folders. */
     private class RowAdapter extends BaseAdapter {
 
         private final Panel panel;
@@ -319,13 +367,13 @@ public class TwinPaneActivity extends Activity {
 
         @Override
         public int getCount() {
-            return panel.entries.size();
+            return panel.rows.size();
         }
 
         @Override
         public Object getItem(int position) {
-            return position >= 0 && position < panel.entries.size()
-                    ? panel.entries.get(position) : null;
+            return position >= 0 && position < panel.rows.size()
+                    ? panel.rows.get(position) : null;
         }
 
         @Override
@@ -338,15 +386,13 @@ public class TwinPaneActivity extends Activity {
             LinearLayout row = new LinearLayout(TwinPaneActivity.this);
             row.setOrientation(LinearLayout.HORIZONTAL);
             row.setGravity(Gravity.CENTER_VERTICAL);
-            int pad = dp(8);
-            row.setPadding(pad, dp(6), pad, dp(6));
+            row.setPadding(dp(8), dp(6), dp(8), dp(6));
 
-            if (position < 0 || position >= panel.entries.size()) {
+            if (position < 0 || position >= panel.rows.size()) {
                 return row;
             }
-            final File file = panel.entries.get(position);
-            boolean ticked = panel.selected.contains(file.getAbsolutePath());
-            boolean isDir = file.isDirectory();
+            final Row entry = panel.rows.get(position);
+            boolean ticked = panel.selected.contains(entry.path);
 
             row.setBackgroundColor(ticked
                     ? Color.parseColor("#16243a") : Color.parseColor("#0b1015"));
@@ -360,16 +406,13 @@ public class TwinPaneActivity extends Activity {
 
             LinearLayout column = new LinearLayout(TwinPaneActivity.this);
             column.setOrientation(LinearLayout.VERTICAL);
-            LinearLayout.LayoutParams columnParams = new LinearLayout.LayoutParams(
-                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
 
             TextView name = new TextView(TwinPaneActivity.this);
             name.setTypeface(Typeface.MONOSPACE);
             name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
-            name.setTextColor(Color.parseColor(isDir ? "#9ecbff" : "#d7dee8"));
+            name.setTextColor(Color.parseColor(entry.dir ? "#9ecbff" : "#d7dee8"));
             name.setSingleLine(true);
-            name.setText(file.getName().isEmpty()
-                    ? file.getAbsolutePath() : file.getName());
+            name.setText(entry.name);
             column.addView(name);
 
             TextView meta = new TextView(TwinPaneActivity.this);
@@ -377,12 +420,13 @@ public class TwinPaneActivity extends Activity {
             meta.setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f);
             meta.setTextColor(Color.parseColor("#56606d"));
             meta.setSingleLine(true);
-            meta.setText(isDir ? "folder" : readableSize(file.length()));
+            meta.setText(entry.dir ? "folder" : readableSize(entry.size));
             column.addView(meta);
 
-            row.addView(column, columnParams);
+            row.addView(column, new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-            if (isDir) {
+            if (entry.dir) {
                 TextView open = new TextView(TwinPaneActivity.this);
                 open.setText("›");
                 open.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20);
@@ -393,7 +437,7 @@ public class TwinPaneActivity extends Activity {
                     @Override
                     public void onClick(View v) {
                         focus(panel);
-                        openDirectory(panel, file);
+                        openRow(panel, entry);
                     }
                 });
                 row.addView(open);
@@ -402,7 +446,7 @@ public class TwinPaneActivity extends Activity {
         }
     }
 
-    // ══════════════════════════════════════════════════════════════ navigation
+    // ══════════════════════════════════════════════════════════════ panel state
 
     private File[] startCandidates() {
         List<File> list = new ArrayList<>();
@@ -438,69 +482,147 @@ public class TwinPaneActivity extends Activity {
         return root != null && root.isDirectory() && root.canRead() && root.list() != null;
     }
 
-    private void refresh(Panel panel) {
-        if (panel.dir == null) {
-            panel.dir = getFilesDir();
+    /** Point a panel at a local folder and fill it. */
+    private void setLocal(Panel panel, File folder) {
+        panel.termux = false;
+        panel.dir = folder;
+        panel.path = folder == null ? null : folder.getAbsolutePath();
+        panel.selected.clear();
+        refresh(panel);
+    }
+
+    /** Point a panel at a Termux folder and fill it through the bridge. */
+    private void setTermux(final Panel panel, final String path) {
+        panel.termux = true;
+        panel.dir = null;
+        panel.path = path;
+        panel.selected.clear();
+        refresh(panel);
+        if (!TermuxBridge.workerAlive()) {
+            return;                                  // refresh() already explained
         }
-        File[] children = panel.dir.canRead() ? panel.dir.listFiles() : null;
-        panel.entries.clear();
-        if (children != null) {
-            List<File> sorted = new ArrayList<>(Arrays.asList(children));
-            Collections.sort(sorted, new Comparator<File>() {
-                @Override
-                public int compare(File a, File b) {
-                    if (a.isDirectory() != b.isDirectory()) {
-                        return a.isDirectory() ? -1 : 1;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                final TermuxBridge.Listing listing = TermuxBridge.list(path, false);
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (panel.path == null || !panel.path.equals(path)
+                                && !panel.path.equals(listing.path)) {
+                            return;                  // user moved on while we waited
+                        }
+                        if (listing.failure != null) {
+                            statusLabel.setText(" " + listing.failure);
+                            toast(listing.failure);
+                            return;
+                        }
+                        applyListing(panel, listing);
                     }
-                    return a.getName().compareToIgnoreCase(b.getName());
-                }
-            });
-            for (File child : sorted) {
-                if (!child.getName().startsWith(".")) {
-                    panel.entries.add(child);
+                });
+            }
+        }).start();
+    }
+
+    private void applyListing(Panel panel, TermuxBridge.Listing listing) {
+        panel.path = listing.path;
+        panel.rows.clear();
+        for (TermuxBridge.Item item : listing.items) {
+            panel.rows.add(new Row(item.name, item.path, item.dir, item.size, item.mtime));
+        }
+        panel.adapter.notifyDataSetChanged();
+        paintPanel(panel);
+        paintFocus();
+    }
+
+    /** Re-read the panel's folder, whichever engine it uses. */
+    private void refresh(Panel panel) {
+        if (panel.isLocal()) {
+            File folder = panel.dir;
+            if (folder == null || !folder.canRead()) {
+                panel.rows.clear();
+                panel.adapter.notifyDataSetChanged();
+                paintPanel(panel);
+                return;
+            }
+            File[] children = folder.listFiles();
+            panel.rows.clear();
+            if (children != null) {
+                List<File> sorted = new ArrayList<>(Arrays.asList(children));
+                Collections.sort(sorted, new Comparator<File>() {
+                    @Override
+                    public int compare(File a, File b) {
+                        if (a.isDirectory() != b.isDirectory()) {
+                            return a.isDirectory() ? -1 : 1;
+                        }
+                        return a.getName().compareToIgnoreCase(b.getName());
+                    }
+                });
+                for (File child : sorted) {
+                    if (child.getName().startsWith(".")) {
+                        continue;
+                    }
+                    panel.rows.add(new Row(child.getName(), child.getAbsolutePath(),
+                            child.isDirectory(),
+                            child.isDirectory() ? 0 : child.length(),
+                            child.lastModified()));
                 }
             }
+            dropDeadTicks(panel);
+            panel.adapter.notifyDataSetChanged();
+            paintPanel(panel);
+        } else {
+            setTermux(panel, panel.path == null ? TermuxBridge.termuxHome() : panel.path);
         }
-        // drop ticks for anything that is no longer listed
+    }
+
+    private void dropDeadTicks(Panel panel) {
         Set<String> alive = new LinkedHashSet<>();
-        for (File entry : panel.entries) {
-            if (panel.selected.contains(entry.getAbsolutePath())) {
-                alive.add(entry.getAbsolutePath());
+        for (Row row : panel.rows) {
+            if (panel.selected.contains(row.path)) {
+                alive.add(row.path);
             }
         }
         panel.selected.retainAll(alive);
-
-        panel.pathLabel.setText(shortPath(panel.dir));
-        panel.adapter.notifyDataSetChanged();
     }
 
-    private String shortPath(File folder) {
-        String full = folder.getAbsolutePath();
-        File root = Environment.getExternalStorageDirectory();
-        if (root != null) {
-            String prefix = root.getAbsolutePath();
-            if (full.startsWith(prefix)) {
-                return "/sdcard" + full.substring(prefix.length());
-            }
+    private void paintPanel(Panel panel) {
+        boolean termux = panel.termux;
+        panel.modeLabel.setText(termux ? " TERMUX " : " PHONE ");
+        panel.modeLabel.setTextColor(Color.parseColor(termux ? "#ffd479" : "#7ee787"));
+        GradientDrawable chip = new GradientDrawable();
+        chip.setColor(Color.parseColor(termux ? "#3a2f16" : "#13301c"));
+        chip.setCornerRadius(dp(6));
+        panel.modeLabel.setBackground(chip);
+
+        String shown = panel.path == null ? "…" : shortPath(panel.path, termux);
+        panel.pathLabel.setText(shown);
+    }
+
+    private String shortPath(String path, boolean termux) {
+        String home = TermuxBridge.termuxHome();
+        if (termux && path != null && path.startsWith(home)) {
+            return "~" + path.substring(home.length());
         }
-        return full;
+        File root = Environment.getExternalStorageDirectory();
+        if (!termux && root != null && path != null
+                && path.startsWith(root.getAbsolutePath())) {
+            return "/sdcard" + path.substring(root.getAbsolutePath().length());
+        }
+        return path == null ? "…" : path;
     }
 
     private void focus(Panel panel) {
-        if (active == panel) {
-            paintFocus();
-            return;
-        }
         active = panel;
         paintFocus();
     }
 
     private void paintFocus() {
         if (top.card != null) {
-            paintCard(top.card, top == active);
+            paintCard(top.card, top == active, top.termux);
         }
         if (bottom.card != null) {
-            paintCard(bottom.card, bottom == active);
+            paintCard(bottom.card, bottom == active, bottom.termux);
         }
         boolean topActive = active == top;
         copyButton.setText(topActive ? "Copy ▼" : "Copy ▲");
@@ -510,19 +632,65 @@ public class TwinPaneActivity extends Activity {
         moveButton.setAlpha(hasTicks ? 1f : 0.45f);
     }
 
-    private void paintCard(LinearLayout card, boolean isActive) {
+    private void paintCard(LinearLayout card, boolean isActive, boolean termux) {
         GradientDrawable background = new GradientDrawable();
-        background.setColor(Color.parseColor(isActive ? "#1b2b40" : "#131a22"));
+        String color;
+        if (!isActive) {
+            color = "#131a22";
+        } else {
+            color = termux ? "#2b2415" : "#1b2b40";
+        }
+        background.setColor(Color.parseColor(color));
         background.setCornerRadius(dp(6));
         card.setBackground(background);
     }
 
-    private void toggle(Panel panel, int position) {
-        if (position < 0 || position >= panel.entries.size()) {
+    private void refreshWorkerState() {
+        if (TermuxBridge.workerAlive()) {
+            statusLabel.setText(" Termux worker: ready");
             return;
         }
-        File file = panel.entries.get(position);
-        String key = file.getAbsolutePath();
+        statusLabel.setText(" Termux worker: not running · tap here for the command");
+        statusLabel.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                showWorkerHelp();
+            }
+        });
+    }
+
+    private void showWorkerHelp() {
+        final String command = "twinpane-bridge";
+        new AlertDialog.Builder(this)
+                .setTitle("Termux panel is inactive")
+                .setMessage("To read Termux's own files, a small worker must run "
+                        + "inside Termux. Open Termux and run:\n\n"
+                        + command + "\n\n"
+                        + "Or in the background, so it survives:\n\n"
+                        + "sv-enable twinpane-bridge\n\n"
+                        + "The phone panel needs none of this — it always works.")
+                .setPositiveButton("Got it", null)
+                .setNegativeButton("Copy command", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        android.content.ClipboardManager clipboard =
+                                (android.content.ClipboardManager) getSystemService(
+                                        CLIPBOARD_SERVICE);
+                        clipboard.setPrimaryClip(
+                                android.content.ClipData.newPlainText("termux", command));
+                        toast("Copied");
+                    }
+                })
+                .show();
+    }
+
+    // ══════════════════════════════════════════════════════════════ navigation
+
+    private void toggle(Panel panel, int position) {
+        if (position < 0 || position >= panel.rows.size()) {
+            return;
+        }
+        String key = panel.rows.get(position).path;
         if (!panel.selected.remove(key)) {
             panel.selected.add(key);
         }
@@ -530,57 +698,101 @@ public class TwinPaneActivity extends Activity {
         paintFocus();
     }
 
-    private void openDirectory(Panel panel, File folder) {
-        if (folder == null || !folder.isDirectory()) {
+    private void openRow(Panel panel, Row row) {
+        if (!row.dir) {
             return;
         }
-        if (!folder.canRead()) {
-            toast("No access to " + folder.getName());
-            return;
+        if (panel.isLocal()) {
+            File folder = new File(row.path);
+            if (!folder.canRead()) {
+                toast("No access to " + row.name);
+                return;
+            }
+            setLocal(panel, folder);
+        } else {
+            setTermux(panel, row.path);
         }
-        panel.dir = folder;
-        panel.selected.clear();
-        refresh(panel);
         paintFocus();
     }
 
     private void goUp(Panel panel) {
-        File parent = panel.dir == null ? null : panel.dir.getParentFile();
-        if (parent == null || !parent.canRead()) {
-            showShortcuts(panel);
-            return;
+        if (panel.isLocal()) {
+            File parent = panel.dir == null ? null : panel.dir.getParentFile();
+            if (parent == null || !parent.canRead()) {
+                showShortcuts(panel);
+                return;
+            }
+            setLocal(panel, parent);
+        } else {
+            if (panel.path == null) {
+                return;
+            }
+            String parent = new File(panel.path).getParent();
+            if (parent == null) {
+                showShortcuts(panel);
+                return;
+            }
+            setTermux(panel, parent);
         }
-        panel.dir = parent;
-        panel.selected.clear();
-        refresh(panel);
         paintFocus();
+    }
+
+    private void chooseSource(final Panel panel) {
+        final String[] options = {
+                "Phone storage  (works always)",
+                "Termux home  (needs the worker)",
+        };
+        new AlertDialog.Builder(this)
+                .setTitle("What should this panel show?")
+                .setItems(options, new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        if (which == 0) {
+                            setLocal(panel, firstReadable(startCandidates()));
+                        } else {
+                            if (!TermuxBridge.workerAlive()) {
+                                showWorkerHelp();
+                                return;
+                            }
+                            setTermux(panel, TermuxBridge.termuxHome());
+                        }
+                        paintFocus();
+                    }
+                })
+                .show();
     }
 
     private void editPath(final Panel panel) {
         final EditText input = new EditText(this);
         input.setTypeface(Typeface.MONOSPACE);
         input.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f);
-        input.setText(panel.dir == null ? "" : panel.dir.getAbsolutePath());
+        input.setText(panel.path == null ? "" : panel.path);
         input.setPadding(dp(12), dp(8), dp(12), dp(8));
 
         new AlertDialog.Builder(this)
-                .setTitle(panel.isTop ? "Top panel folder" : "Bottom panel folder")
+                .setTitle(panel.termux ? "Termux path" : "Phone path")
                 .setView(input)
                 .setPositiveButton("Open", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        File wanted = new File(input.getText().toString().trim());
-                        if (!wanted.isDirectory()) {
-                            toast("Not a folder: " + wanted.getPath());
+                        String typed = input.getText().toString().trim();
+                        if (typed.isEmpty()) {
                             return;
                         }
-                        if (!wanted.canRead()) {
-                            toast("Not readable — grant storage access");
-                            return;
+                        if (panel.isLocal()) {
+                            File wanted = new File(typed);
+                            if (!wanted.isDirectory()) {
+                                toast("Not a folder");
+                                return;
+                            }
+                            if (!wanted.canRead()) {
+                                toast("Not readable — grant storage access");
+                                return;
+                            }
+                            setLocal(panel, wanted);
+                        } else {
+                            setTermux(panel, typed);
                         }
-                        panel.dir = wanted;
-                        panel.selected.clear();
-                        refresh(panel);
                         paintFocus();
                     }
                 })
@@ -589,220 +801,344 @@ public class TwinPaneActivity extends Activity {
     }
 
     private void showShortcuts(final Panel panel) {
-        final List<File> places = new ArrayList<>();
         final List<String> names = new ArrayList<>();
-        File shared = Environment.getExternalStorageDirectory();
-        addPlace(places, names, "Phone storage  /sdcard", shared);
-        addPlace(places, names, "Downloads", Environment.getExternalStoragePublicDirectory(
-                Environment.DIRECTORY_DOWNLOADS));
-        addPlace(places, names, "DCIM (camera)", Environment.getExternalStoragePublicDirectory(
-                Environment.DIRECTORY_DCIM));
-        addPlace(places, names, "Pictures", Environment.getExternalStoragePublicDirectory(
-                Environment.DIRECTORY_PICTURES));
-        addPlace(places, names, "Music", Environment.getExternalStoragePublicDirectory(
-                Environment.DIRECTORY_MUSIC));
-        addPlace(places, names, "Documents", Environment.getExternalStoragePublicDirectory(
-                Environment.DIRECTORY_DOCUMENTS));
-        if (shared != null) {
-            addPlace(places, names, "Android/data", new File(shared, "Android/data"));
-            addPlace(places, names, "shared  (TwinPane)", new File(shared, "TwinPane"));
+        final List<Runnable> actions = new ArrayList<>();
+
+        if (panel.isLocal()) {
+            addLocalPlace(names, actions, "Phone storage  /sdcard",
+                    Environment.getExternalStorageDirectory());
+            addLocalPlace(names, actions, "Downloads",
+                    Environment.getExternalStoragePublicDirectory(
+                            Environment.DIRECTORY_DOWNLOADS));
+            addLocalPlace(names, actions, "DCIM (camera)",
+                    Environment.getExternalStoragePublicDirectory(
+                            Environment.DIRECTORY_DCIM));
+            addLocalPlace(names, actions, "Pictures",
+                    Environment.getExternalStoragePublicDirectory(
+                            Environment.DIRECTORY_PICTURES));
+            addLocalPlace(names, actions, "Music",
+                    Environment.getExternalStoragePublicDirectory(
+                            Environment.DIRECTORY_MUSIC));
+            addLocalPlace(names, actions, "Documents",
+                    Environment.getExternalStoragePublicDirectory(
+                            Environment.DIRECTORY_DOCUMENTS));
+            File shared = Environment.getExternalStorageDirectory();
+            if (shared != null) {
+                addLocalPlace(names, actions, "Android/data",
+                        new File(shared, "Android/data"));
+                addLocalPlace(names, actions, "shared  (TwinPane)",
+                        new File(shared, "TwinPane"));
+            }
+            addLocalPlace(names, actions, "This app's files", getFilesDir());
+        } else {
+            String home = TermuxBridge.termuxHome();
+            for (final String candidate : new String[]{home}) {
+                final String label = "Termux home  ~";
+                names.add(label);
+                actions.add(new Runnable() {
+                    @Override
+                    public void run() {
+                        setTermux(panel, candidate);
+                    }
+                });
+            }
+            final TermuxBridge.Listing probe = TermuxBridge.list(home, false);
+            for (final String[] place : probe.places) {
+                names.add(place[0]);
+                actions.add(new Runnable() {
+                    @Override
+                    public void run() {
+                        setTermux(panel, place[1]);
+                    }
+                });
+            }
+            if (probe.failure != null) {
+                toast(probe.failure);
+            }
         }
-        // Ready for when the Termux panel is wired in: show it, say why if not.
-        addPlace(places, names, "Termux home  ~",
-                new File("/data/data/com.termux/files/home"));
-        addPlace(places, names, "This app's files", getFilesDir());
 
         new AlertDialog.Builder(this)
                 .setTitle((panel.isTop ? "Top" : "Bottom") + " panel → jump to")
                 .setItems(names.toArray(new String[0]), new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        File place = places.get(which);
-                        if (!place.isDirectory()) {
-                            toast("Does not exist on this phone");
-                            return;
-                        }
-                        if (!place.canRead()) {
-                            toast("Permission denied — Android blocks this path");
-                            return;
-                        }
-                        panel.dir = place;
-                        panel.selected.clear();
-                        refresh(panel);
+                        actions.get(which).run();
                         paintFocus();
                     }
                 })
-                .setPositiveButton("Grant full access", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        requestStorage();
-                    }
-                })
+                .setPositiveButton(panel.isLocal() ? "Grant full access" : "Worker help",
+                        new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                if (panel.isLocal()) {
+                                    requestStorage();
+                                } else {
+                                    showWorkerHelp();
+                                }
+                            }
+                        })
                 .setNegativeButton("Close", null)
                 .show();
     }
 
-    private void addPlace(List<File> places, List<String> names, String label, File folder) {
+    private void addLocalPlace(List<String> names, List<Runnable> actions,
+                               String label, final File folder) {
         if (folder == null) {
             return;
         }
-        places.add(folder);
         names.add(label + (folder.canRead() ? "" : "   (no access)"));
+        actions.add(new Runnable() {
+            @Override
+            public void run() {
+                if (!folder.isDirectory()) {
+                    toast("Does not exist on this phone");
+                    return;
+                }
+                if (!folder.canRead()) {
+                    toast("Permission denied — Android blocks this path");
+                    return;
+                }
+                setLocal(active, folder);
+            }
+        });
     }
 
     // ══════════════════════════════════════════════════════════════ transfer
 
     private void startTransfer(final boolean move) {
-        if (transferRunning) {
+        if (busy) {
             toast("Already working…");
             return;
         }
         final Panel source = active;
         final Panel target = active == top ? bottom : top;
+        if (source.rows.isEmpty()) {
+            toast("This panel is empty");
+            return;
+        }
         if (source.selected.isEmpty()) {
             toast("Tick some items first");
             return;
         }
-        if (target.dir == null || !target.dir.canWrite()) {
-            toast("Cannot write into " + (target.dir == null ? "?" : target.dir.getName())
-                    + " — grant storage access");
+        if (target.path == null) {
+            toast("The other panel has no folder open");
             return;
         }
-        if (hasSharedAccess() == false) {
+
+        boolean crossesTermux = source.termux || target.termux;
+        if (!crossesTermux && (!hasSharedAccess() || !target.dir.canWrite())) {
             toast("Android is blocking storage — tap the bottom bar");
             return;
         }
 
-        final List<File> items = new ArrayList<>();
-        for (String path : source.selected) {
-            items.add(new File(path));
-        }
-
-        int conflicts = 0;
-        for (File item : items) {
-            if (new File(target.dir, item.getName()).exists()) {
-                conflicts++;
-            }
-        }
-        if (conflicts == 0) {
-            runTransfer(items, target.dir, move, 0, source, target);
-            return;
-        }
-
-        final String[] choices = {"Overwrite all", "Skip existing", "Keep both", "Cancel"};
-        new AlertDialog.Builder(this)
-                .setTitle(conflicts + (conflicts == 1 ? " item already exists"
-                        : " items already exist"))
-                .setItems(choices, new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        if (which == 3) {
-                            return;
-                        }
-                        runTransfer(items, target.dir, move, which, source, target);
+        final List<String> items = new ArrayList<>(source.selected);
+        final boolean viaBridge = crossesTermux;
+        askConflictIfNeeded(items, target, new ConflictAnswer() {
+            @Override
+            public void onAnswer(String conflict) {
+                if (viaBridge) {
+                    if (!TermuxBridge.workerAlive()) {
+                        showWorkerHelp();
+                        return;
                     }
-                })
-                .show();
+                    runBridgeTransfer(move ? "move" : "copy", items, target,
+                            conflict, source, target);
+                } else {
+                    runLocalTransfer(items, move, conflict, source, target);
+                }
+            }
+        });
     }
 
-    private void runTransfer(final List<File> items, final File targetDir,
-                             final boolean move, final int mode,
-                             final Panel source, final Panel target) {
-        transferRunning = true;
-        transferCancelled = false;
+    /**
+     * The phone's own two panels keep the fast Java path: no worker, no JSON,
+     * no delay, and it is the path that works when Termux is not installed.
+     */
+    private void runLocalTransfer(final List<String> items, final boolean move,
+                                  final String conflict, final Panel source,
+                                  final Panel target) {
+        busy = true;
+        cancelled = false;
+        showProgress(move ? "Moving" : "Copying", items.size());
 
-        transferText = new TextView(this);
-        transferText.setTypeface(Typeface.MONOSPACE);
-        transferText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
-        transferText.setTextColor(Color.parseColor("#d7dee8"));
-        transferText.setPadding(dp(16), dp(12), dp(16), dp(12));
-        transferText.setText(readyMessage(items.size()));
-
-        transferDialog = new AlertDialog.Builder(this)
-                .setTitle(move ? "Moving" : "Copying")
-                .setView(transferText)
-                .setNegativeButton("Cancel", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        transferCancelled = true;
-                    }
-                })
-                .create();
-        transferDialog.setCancelable(false);
-        transferDialog.show();
-
-        final File destination = targetDir;
-        Thread worker = new Thread(new Runnable() {
+        new Thread(new Runnable() {
             @Override
             public void run() {
+                final List<String> problems = new ArrayList<>();
                 int done = 0;
                 int skipped = 0;
-                final List<String> problems = new ArrayList<>();
-                for (File item : items) {
-                    if (transferCancelled) {
+                for (String item : items) {
+                    if (cancelled) {
                         break;
                     }
-                    setTransferText("working on  " + item.getName());
+                    setProgressText("working on  " + new File(item).getName());
                     try {
-                        int result = transferOne(item, destination, move, mode);
-                        if (result == 1) {
-                            skipped++;
-                        } else {
+                        if (copyOne(new File(item), target.dir, move,
+                                "skip".equals(conflict) ? 1
+                                        : "rename".equals(conflict) ? 2 : 0)) {
                             done++;
+                        } else {
+                            skipped++;
                         }
-                    } catch (Exception error) {
-                        problems.add(item.getName() + "  —  " + error.getMessage());
+                    } catch (IOException error) {
+                        problems.add(new File(item).getName() + "  —  "
+                                + error.getMessage());
                     }
                 }
                 final int finished = done;
                 final int left = skipped;
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (transferDialog != null && transferDialog.isShowing()) {
-                            transferDialog.dismiss();
-                        }
-                        transferRunning = false;
-                        transferCancelled = false;
-                        refresh(source);
-                        refresh(target);
-                        paintFocus();
-                        String summary = (move ? "Moved " : "Copied ") + finished
-                                + (left > 0 ? " · skipped " + left : "")
-                                + (problems.isEmpty() ? "" : " · " + problems.size() + " failed");
-                        statusLabel.setText(" " + summary);
-                        toast(summary);
-                        if (!problems.isEmpty()) {
-                            showProblems(problems);
-                        }
-                    }
-                });
+                finishTransfer(finished, left, problems, move, source, target);
             }
-        });
-        worker.setDaemon(true);
-        worker.start();
+        }).start();
     }
 
-    private String readyMessage(int count) {
-        return count + (count == 1 ? " item" : " items") + " queued";
+    /** Anything touching Termux goes through the worker, which sees both sides. */
+    private void runBridgeTransfer(final String mode, final List<String> items,
+                                   final Panel target, final String conflict,
+                                   final Panel source, final Panel targetPanel) {
+        busy = true;
+        cancelled = false;
+        showProgress("move".equals(mode) ? "Moving" : "Copying", items.size());
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                setProgressText("asking Termux…");
+                TermuxBridge.Outcome outcome =
+                        TermuxBridge.transfer(mode, items, target.path, conflict);
+                final List<String> problems = new ArrayList<>(outcome.problems);
+                if (outcome.error != null) {
+                    problems.add(outcome.error);
+                }
+                finishTransfer(outcome.files + outcome.dirs, outcome.skipped,
+                        problems, "move".equals(mode), source, targetPanel);
+            }
+        }).start();
     }
 
-    private void setTransferText(final String message) {
+    private void finishTransfer(int done, int skipped, List<String> problems,
+                                boolean move, Panel source, Panel target) {
+        final int finished = done;
+        final int left = skipped;
+        final List<String> issues = problems;
+        final boolean wasMove = move;
         runOnUiThread(new Runnable() {
             @Override
             public void run() {
-                if (transferText != null) {
-                    transferText.setText(message);
+                dismissProgress();
+                busy = false;
+                source.selected.clear();
+                refresh(source);
+                refresh(target);
+                paintFocus();
+                String summary = (wasMove ? "Moved " : "Copied ") + finished
+                        + (left > 0 ? " · skipped " + left : "")
+                        + (issues.isEmpty() ? "" : " · " + issues.size() + " failed");
+                statusLabel.setText(" " + summary);
+                toast(summary);
+                if (!issues.isEmpty()) {
+                    showProblems(issues);
                 }
             }
         });
+    }
+
+    /**
+     * Works out what to do about names that already exist.
+     *
+     * <p>An AlertDialog is asynchronous, so this cannot return the answer.
+     * It calls {@code proceed} once the user has decided - and calls nothing at
+     * all when they cancel, which is what makes "Cancel" actually cancel.
+     */
+    private void askConflictIfNeeded(List<String> items, Panel target,
+                                     ConflictAnswer proceed) {
+        int conflicts = 0;
+        for (String item : items) {
+            String name = new File(item).getName();
+            if (target.isLocal()) {
+                if (new File(target.dir, name).exists()) {
+                    conflicts++;
+                }
+            }
+        }
+
+        if (conflicts == 0) {
+            // Nothing to clash with on the side we can see. "Keep both" is the
+            // safe default everywhere else: the worker never destroys a file
+            // just because two names matched.
+            proceed.onAnswer("rename");
+            return;
+        }
+
+        final ConflictAnswer callback = proceed;
+        new AlertDialog.Builder(this)
+                .setTitle(conflicts + (conflicts == 1 ? " item already exists"
+                        : " items already exist"))
+                .setItems(new String[]{"Keep both", "Overwrite", "Skip", "Cancel"},
+                        new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialog, int which) {
+                                String choice = which == 0 ? "rename"
+                                        : which == 1 ? "overwrite"
+                                        : which == 2 ? "skip" : null;
+                                if (choice != null) {
+                                    callback.onAnswer(choice);
+                                }
+                            }
+                        })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private interface ConflictAnswer {
+        void onAnswer(String conflict);
+    }
+
+    private void showProgress(String title, int count) {
+        progressText = new TextView(this);
+        progressText.setTypeface(Typeface.MONOSPACE);
+        progressText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f);
+        progressText.setTextColor(Color.parseColor("#d7dee8"));
+        progressText.setPadding(dp(16), dp(12), dp(16), dp(12));
+        progressText.setText(count + (count == 1 ? " item" : " items") + " queued");
+
+        progressDialog = new AlertDialog.Builder(this)
+                .setTitle(title)
+                .setView(progressText)
+                .setNegativeButton("Cancel", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface dialog, int which) {
+                        cancelled = true;
+                    }
+                })
+                .create();
+        progressDialog.setCancelable(false);
+        progressDialog.show();
+    }
+
+    private void setProgressText(final String message) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (progressText != null) {
+                    progressText.setText(message);
+                }
+            }
+        });
+    }
+
+    private void dismissProgress() {
+        if (progressDialog != null && progressDialog.isShowing()) {
+            progressDialog.dismiss();
+        }
+        progressDialog = null;
     }
 
     private void showProblems(List<String> problems) {
         StringBuilder body = new StringBuilder();
         int limit = Math.min(problems.size(), 8);
-        for (int i = 0; i < limit; i++) {
-            body.append("• ").append(problems.get(i)).append('\n');
+        for (int index = 0; index < limit; index++) {
+            body.append("• ").append(problems.get(index)).append('\n');
         }
         if (problems.size() > limit) {
             body.append("… and ").append(problems.size() - limit).append(" more");
@@ -815,27 +1151,25 @@ public class TwinPaneActivity extends Activity {
     }
 
     /**
-     * Moves or copies one item into {@code targetDir}.
+     * Copy or move one local item into {@code targetDir}.
      *
-     * @return 0 when written, 1 when deliberately skipped
+     * @return true when written, false when deliberately skipped
      */
-    private int transferOne(File item, File targetDir, boolean move, int mode)
+    private boolean copyOne(File item, File targetDir, boolean move, int mode)
             throws IOException {
         File destination = new File(targetDir, item.getName());
 
-        // Refuse the two ways this could eat data.
         if (item.isDirectory() && isInside(targetDir, item)) {
-            throw new IOException("cannot " + (move ? "move" : "copy")
-                    + " a folder into itself");
+            throw new IOException("cannot put a folder inside itself");
         }
         File parent = item.getParentFile();
         if (parent != null && parent.equals(targetDir) && mode != 2) {
-            return 1;                                     // already in this folder
+            return false;
         }
 
         if (destination.exists()) {
             if (mode == 1) {
-                return 1;                                 // skip existing
+                return false;                            // skip
             }
             if (mode == 2) {
                 destination = uniqueName(targetDir, item.getName());
@@ -844,18 +1178,14 @@ public class TwinPaneActivity extends Activity {
             }
         }
 
-        if (move) {
-            if (item.renameTo(destination)) {
-                return 0;                                 // same filesystem: instant
-            }
+        if (move && item.renameTo(destination)) {
+            return true;                                 // same filesystem
         }
         copyRecursive(item, destination);
-        if (move) {
-            if (!deleteRecursive(item)) {
-                throw new IOException("copied, but could not remove the original");
-            }
+        if (move && !deleteRecursive(item)) {
+            throw new IOException("copied, but could not remove the original");
         }
-        return 0;
+        return true;
     }
 
     private static boolean isInside(File child, File parent) {
@@ -874,7 +1204,7 @@ public class TwinPaneActivity extends Activity {
             extension = name.substring(dot);
         }
         File candidate = new File(folder, name);
-        int counter = 2;
+        int counter = 1;
         while (candidate.exists() && counter < 1000) {
             candidate = new File(folder, stem + " (" + counter + ")" + extension);
             counter++;
@@ -889,7 +1219,7 @@ public class TwinPaneActivity extends Activity {
             }
             File[] children = source.listFiles();
             if (children == null) {
-                return;                                   // nothing readable inside
+                return;
             }
             for (File child : children) {
                 copyRecursive(child, new File(destination, child.getName()));
@@ -908,7 +1238,7 @@ public class TwinPaneActivity extends Activity {
                 int read;
                 while ((read = in.read(buffer)) > 0) {
                     out.write(buffer, 0, read);
-                    if (transferCancelled) {
+                    if (cancelled) {
                         break;
                     }
                 }
@@ -964,7 +1294,7 @@ public class TwinPaneActivity extends Activity {
         input.setPadding(dp(12), dp(8), dp(12), dp(8));
 
         new AlertDialog.Builder(this)
-                .setTitle("New folder in " + shortPath(panel.dir))
+                .setTitle("New folder")
                 .setView(input)
                 .setPositiveButton("Create", new DialogInterface.OnClickListener() {
                     @Override
@@ -973,16 +1303,32 @@ public class TwinPaneActivity extends Activity {
                         if (name.isEmpty()) {
                             return;
                         }
-                        File created = new File(panel.dir, name);
-                        if (created.exists()) {
-                            toast("Already exists");
-                            return;
-                        }
-                        if (created.mkdirs()) {
-                            refresh(panel);
-                            toast("Created " + name);
+                        if (panel.isLocal()) {
+                            File created = new File(panel.dir, name);
+                            if (created.exists()) {
+                                toast("Already exists");
+                                return;
+                            }
+                            if (created.mkdirs()) {
+                                refresh(panel);
+                                toast("Created " + name);
+                            } else {
+                                toast("Could not create — no write access");
+                            }
                         } else {
-                            toast("Could not create — no write access");
+                            if (!TermuxBridge.workerAlive()) {
+                                showWorkerHelp();
+                                return;
+                            }
+                            TermuxBridge.Outcome outcome =
+                                    TermuxBridge.makeFolder(panel.path, name);
+                            if (outcome.ok) {
+                                refresh(panel);
+                                toast("Created " + name);
+                            } else {
+                                toast(outcome.error == null
+                                        ? "Could not create" : outcome.error);
+                            }
                         }
                     }
                 })
@@ -1002,16 +1348,31 @@ public class TwinPaneActivity extends Activity {
                 .setPositiveButton("Delete", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
-                        int removed = 0;
-                        for (String path : new ArrayList<>(panel.selected)) {
-                            if (deleteRecursive(new File(path))) {
-                                removed++;
+                        List<String> items = new ArrayList<>(panel.selected);
+                        if (panel.isLocal()) {
+                            int removed = 0;
+                            for (String path : items) {
+                                if (deleteRecursive(new File(path))) {
+                                    removed++;
+                                }
                             }
+                            panel.selected.clear();
+                            refresh(panel);
+                            paintFocus();
+                            toast("Deleted " + removed);
+                        } else {
+                            if (!TermuxBridge.workerAlive()) {
+                                showWorkerHelp();
+                                return;
+                            }
+                            TermuxBridge.Outcome outcome = TermuxBridge.delete(items);
+                            panel.selected.clear();
+                            refresh(panel);
+                            paintFocus();
+                            toast(outcome.ok
+                                    ? "Deleted " + (outcome.files + outcome.dirs)
+                                    : String.valueOf(outcome.error));
                         }
-                        panel.selected.clear();
-                        refresh(panel);
-                        paintFocus();
-                        toast("Deleted " + removed);
                     }
                 })
                 .setNegativeButton("Cancel", null)
@@ -1019,38 +1380,37 @@ public class TwinPaneActivity extends Activity {
     }
 
     private void showEntryOptions(final Panel panel, int position) {
-        if (position < 0 || position >= panel.entries.size()) {
+        if (position < 0 || position >= panel.rows.size()) {
             return;
         }
-        final File file = panel.entries.get(position);
-        final String[] options = file.isDirectory()
+        final Row entry = panel.rows.get(position);
+        String[] options = entry.dir
                 ? new String[]{"Tick / untick", "Open folder", "Show details"}
                 : new String[]{"Tick / untick", "Show details"};
         new AlertDialog.Builder(this)
-                .setTitle(file.getName())
+                .setTitle(entry.name)
                 .setItems(options, new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
                         if (which == 0) {
-                            toggle(panel, panel.entries.indexOf(file));
-                        } else if (which == 1 && file.isDirectory()) {
-                            openDirectory(panel, file);
+                            toggle(panel, panel.rows.indexOf(entry));
+                        } else if (which == 1 && entry.dir) {
+                            openRow(panel, entry);
                         } else {
-                            showDetails(file);
+                            showDetails(entry);
                         }
                     }
                 })
                 .show();
     }
 
-    private void showDetails(File file) {
-        String body = "size     : " + readableSize(file.length())
-                + "\npath     : " + file.getAbsolutePath()
-                + "\nwritable : " + (file.canWrite() ? "yes" : "no")
-                + "\nparent   : " + (file.getParentFile() == null
-                ? "—" : file.getParentFile().getAbsolutePath());
+    private void showDetails(Row entry) {
+        String body = "size     : " + readableSize(entry.size)
+                + "\npath     : " + entry.path
+                + "\nsource   : " + (active.termux
+                ? "Termux (via the worker)" : "phone storage");
         new AlertDialog.Builder(this)
-                .setTitle(file.getName())
+                .setTitle(entry.name)
                 .setMessage(body)
                 .setPositiveButton("OK", null)
                 .show();
@@ -1096,6 +1456,7 @@ public class TwinPaneActivity extends Activity {
     protected void onResume() {
         super.onResume();
         warnIfBlocked();
+        refreshWorkerState();
         refresh(top);
         refresh(bottom);
         paintFocus();

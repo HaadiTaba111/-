@@ -22,7 +22,10 @@ SRC_DIR="${TWINPANE_SRC:-$HOME/twinpane-src}"
 APP_SUBDIR="twin-pane-explorer"
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 BIN="$PREFIX/bin/twinpane"
+BRIDGE_BIN="$PREFIX/bin/twinpane-bridge"
+SERVICE_DIR="$PREFIX/var/service/twinpane-bridge"
 LIB="$PREFIX/lib/twinpane"
+BRIDGE_DIR="/sdcard/TwinPane/bridge"
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 ok()   { printf '\033[1;32m  ✓\033[0m %s\n' "$*"; }
@@ -115,6 +118,35 @@ EOF
     chmod 755 "$BIN"
     ok "دستور twinpane نصب شد"
 
+    # The bridge worker: what makes the Android app able to move files
+    # between Termux and the phone. It reads a folder both sides can see.
+    cat > "$BRIDGE_BIN" <<EOF
+#!/data/data/com.termux/files/usr/bin/sh
+exec python "$LIB/run.py" --bridge "\$@"
+EOF
+    chmod 755 "$BRIDGE_BIN"
+    ok "دستور twinpane-bridge نصب شد"
+
+    mkdir -p "$BRIDGE_DIR"/{requests,work,results} 2>/dev/null || true
+    if [ -d "$BRIDGE_DIR" ]; then
+        ok "پوشه‌ی bridge: $BRIDGE_DIR"
+    else
+        warn "پوشه‌ی bridge ساخته نشد - termux-setup-storage را بزن"
+    fi
+
+    # Optional background service (termux-services). Not required: the app
+    # can also start the worker itself for one batch.
+    if [ -d "$PREFIX/var/service" ] || command -v sv >/dev/null 2>&1; then
+        mkdir -p "$SERVICE_DIR"
+        cat > "$SERVICE_DIR/run" <<EOF
+#!/data/data/com.termux/files/usr/bin/sh
+exec 2>&1
+exec twinpane-bridge
+EOF
+        chmod 755 "$SERVICE_DIR/run"
+        ok "سرویس پس‌زمینه: sv-enable twinpane-bridge"
+    fi
+
     # home-screen shortcut for Termux:Widget, when available
     mkdir -p "$HOME/.shortcuts"
     if [ -f "$LIB/termux-widget.sh" ]; then
@@ -165,6 +197,10 @@ doctor() {
     command -v python >/dev/null && echo "  python         : $(python -c 'import sys;print(sys.version.split()[0])')" || echo "  python         : ندارد"
     command -v git >/dev/null && echo "  git            : $(git --version|awk '{print $3}')" || echo "  git            : ندارد"
     [ -x "$BIN" ] && echo "  twinpane       : نصب شده" || echo "  twinpane       : نصب نشده"
+    [ -x "$BRIDGE_BIN" ] && echo "  twinpane-bridge: نصب شده" || echo "  twinpane-bridge: نصب نشده"
+    [ -d "$BRIDGE_DIR" ] && echo "  bridge folder  : ✅ $BRIDGE_DIR" || echo "  bridge folder  : ❌"
+    [ -f "$BRIDGE_DIR/worker.json" ] \
+        && echo "  worker heartbeat: ✅" || echo "  worker heartbeat: ❌ (ترمکس: twinpane-bridge)"
     [ -d "$HOME/storage/shared" ] && echo "  storage        : ✅" || echo "  storage        : ❌ (termux-setup-storage)"
     [ -d /sdcard ] && echo "  /sdcard        : ✅" || echo "  /sdcard        : ❌"
     if [ -f "$HOME/.termux/termux.properties" ]; then
