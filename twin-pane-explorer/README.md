@@ -53,7 +53,7 @@ Tab=switch  c/F5=copy  m/F6=move  F7=new  F8=delete  F10=quit   |   selected: 2
 ## نصب در Termux — یک دستور، همه‌چیز
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/HaadiTaba111/-/main/twin-pane-explorer/scripts/termux-install.sh | bash
+curl -fsSL https://github.com/HaadiTaba111/-/raw/main/twin-pane-explorer/scripts/termux-install.sh | bash
 ```
 
 کلون → نصب وابستگی‌ها → دسترسی حافظه → نصب در `$PREFIX` → تست → **اجرا**.

@@ -5,7 +5,7 @@
 **در Termux** (برای خود برنامه‌ی دو-پنلی):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/HaadiTaba111/-/main/twin-pane-explorer/scripts/termux-install.sh | bash
+curl -fsSL https://github.com/HaadiTaba111/-/raw/main/twin-pane-explorer/scripts/termux-install.sh | bash
 ```
 
 همین. کلون می‌کند، پایتون و git را نصب می‌کند، دسترسی حافظه می‌گیرد، برنامه را
@@ -47,7 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/HaadiTaba111/-/main/twin-pane-explo
 
 ```bash
 # نصب + اجرا
-curl -fsSL https://raw.githubusercontent.com/HaadiTaba111/-/main/twin-pane-explorer/scripts/termux-install.sh | bash
+curl -fsSL https://github.com/HaadiTaba111/-/raw/main/twin-pane-explorer/scripts/termux-install.sh | bash
 
 # گزینه‌های دیگر
 ... | bash -s -- --install     # فقط نصب
