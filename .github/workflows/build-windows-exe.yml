@@ -38,8 +38,18 @@ jobs:
       - name: Unit tests (POSIX-only cases skipped)
         shell: pwsh
         run: |
-          python -m pytest -q -m "not needs_pty" `
+          # -rf prints the reason behind every failure in the log tail, which is
+          # the only place this job can be inspected from.
+          python -m pytest -q -rf --tb=short -m "not needs_pty" `
             tests/test_fsops.py tests/test_archive.py tests/test_core_phase3.py
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::group::full failure summary"
+            python -m pytest -q --tb=line -m "not needs_pty" `
+              tests/test_fsops.py tests/test_archive.py tests/test_core_phase3.py 2>&1 |
+              Select-Object -Last 60
+            Write-Host "::endgroup::"
+          }
+          exit $LASTEXITCODE
 
       - name: Smoke - does curses import and init under Windows?
         shell: pwsh
