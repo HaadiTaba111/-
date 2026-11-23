@@ -45,8 +45,10 @@ Tab=switch  c/F5=copy  m/F6=move  F7=new  F8=delete  F10=quit   |   selected: 2
 - **آشتی با صفحه‌کلید اندروید**: کلیدهای جهت‌دار در هر دو حالت terminfo (normal / application) کار می‌کنند
 - **هر عملیاتی که `cp -r` و `mv` و `rm -rf` می‌دهند** با تاییدیه و گزارش خطای per-file
 
-> **دنبال «چطور نصب کنم؟» هستید؟** → [`docs/HOW-TO-RUN-FA.md`](docs/HOW-TO-RUN-FA.md)
-> — سه راه با مثال، و توضیح کامل اینکه چرا APK نمی‌سازیم.
+> **دانلود آماده (APK · EXE · deb · zip):**
+> [Releases v1.1.0](https://github.com/HaadiTaba111/-/releases/tag/v1.1.0)
+>
+> **راهنمای نصب قدم‌به‌قدم:** [`docs/HOW-TO-RUN-FA.md`](docs/HOW-TO-RUN-FA.md)
 
 ## نصب در Termux (سه خط)
 
@@ -405,19 +407,39 @@ chmod +x ~/.shortcuts/explorer.sh
 یک تپ = باز شدن برنامه با پنل چپ `~` و راست `/sdcard` (یا `$HOME/storage/shared`).
 این نزدیک‌ترین چیز به «اپ» است بدون نیاز به SDK اندروید.
 
-### چرا APK نه؟
+### APK اندروید
 
-APK یک بسته‌ی امضاشده‌ی اندروید است و برای ساختنش SDK + build-tools (aapt2, d8,
-apksigner) و JDK لازم است — هیچ‌کدام در این محیط نیستند (نه اینترنت apt، نه SDK).
-مهم‌تر: یک برنامه‌ی **curses** بدون شبیه‌ساز ترمینال اصلاً داخل اپ اندرویدی اجرا
-نمی‌شود؛ برای همین مسیر درستِ یک TUI، پکیج بومی Termux است. اگر واقعاً آیکون و
-لانچر جدا می‌خواهید، فایل `.github/workflows/build-apk-tui.yml` و توضیحش را ببینید.
+**ساخته می‌شود و آماده است:** `twinpane-1.1.0-debug.apk` در
+[Releases](https://github.com/HaadiTaba111/-/releases/tag/v1.1.0).
 
-### ویندوز — `TwinPane.exe`
+`android/` یک اپ Gradle است که سه کار می‌کند: Termux را پیدا می‌کند، اجازه‌ی
+`RUN_COMMAND` را می‌گیرد، و فایل پایتونِ داخل خودش را در Termux نصب و اجرا می‌کند.
+یعنی APK = **آیکون + سیم‌کشی**، و موتور اصلی همان برنامه‌ی curses است.
 
-کد از اول برای ویندوز نوشته شده (بدون `pwd`/`termios` اجباری؛ `windows-curses`).
-ساخت `.exe` ممکن است ولی **PyInstaller روی لینوکس نمی‌تواند exe بسازد** — باید روی
-ویندوز اجرا شود. دو راه آماده است:
+**چرا لانچر و نه رابط بومی؟** یک برنامه‌ی curses به ترمینال نیاز دارد و اندروید
+ترمینال ندارد. هر APKای که یک TUI را «واقعاً» داخل خودش اجرا کند، در عمل یک
+شبیه‌ساز ترمینال ۵۰–۸۰ مگابایتی است. این APK ۲۳۵ کیلوبایت است و از ترمینال
+واقعی Termux استفاده می‌کند.
+
+```bash
+# ساخت مجدد (روی هر ماشینی با JDK 17 + Android SDK):
+python build_dist.py && python build_apk.py
+
+# یا در CI (ubuntu-latest خودش SDK دارد):
+gh workflow run build-apk.yml --ref main
+```
+
+نصب: APK را باز کنید → اگر Termux نبود لینک F-Droid می‌دهد → Allow → برنامه باز می‌شود.
+برای امضای release، سه secret بگذارید: `ANDROID_KEYSTORE_BASE64`،
+`ANDROID_KEY_ALIAS`، `ANDROID_KEY_PASSWORD`.
+
+### ویندوز — `TwinPane.exe` (ساخته شد)
+
+**دانلود:** `TwinPane.exe` (۸.۶MB) در [Releases](https://github.com/HaadiTaba111/-/releases/tag/v1.1.0).
+دوبار کلیک = اجرا. کد قابل‌حمل است: `pwd`/`grp`/`termios` همه اختیاری شده‌اند و
+`windows-curses` فقط برای رابط لازم است.
+
+برای ساخت مجدد، دو راه:
 
 ```bat
 :: روی ویندوز، کنار پوشه‌ی پروژه
