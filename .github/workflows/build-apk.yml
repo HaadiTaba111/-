@@ -57,8 +57,12 @@ jobs:
         run: |
           python -m pip install --upgrade pip pytest pexpect pyte pyflakes
           python -m pyflakes twinpane tests build_dist.py build_apk.py
+          # The quick, deterministic suites run on every build. test_ui and
+          # test_bridge are slower and stay local; the touch bars and the
+          # project engine are pure enough to gate here.
           python -m pytest -q tests/test_fsops.py tests/test_archive.py \
-                            tests/test_core_phase3.py
+                            tests/test_core_phase3.py \
+                            tests/test_touchbar.py tests/test_projects.py
 
       - name: Build the single-file payload
         run: python build_dist.py

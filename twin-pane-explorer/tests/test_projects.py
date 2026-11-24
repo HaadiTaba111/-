@@ -5,7 +5,6 @@ The runner starts real processes, so these tests use tiny throwaway servers
 thing quietly stopped working.
 """
 import json
-import os
 import sys
 import time
 
