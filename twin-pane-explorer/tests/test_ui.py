@@ -107,7 +107,10 @@ def test_starts_and_shows_both_panels(tree):
         assert "notes.txt" in text
         assert "[project]" in text
         assert "<DIR>" in text
-        assert "5 Copy" in text
+        # The old static "1 Help ... 10 Quit" strip was replaced by the tappable
+        # bar; assert on the buttons that must always be reachable by finger.
+        assert "Copy" in text
+        assert "Quit" in text
         assert "Tab=switch" in text
     finally:
         child.send("q")

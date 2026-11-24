@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import curses
+import json
 import os
 import shutil
 import subprocess
@@ -29,8 +30,10 @@ import time
 from . import config as config_mod
 from . import fsops
 from . import logging_setup
+from . import projects as projects_mod
 from . import plugins
 from . import session as session_mod
+from . import touchbar
 from . import themes as theme_mod
 from .fsops import Entry
 
@@ -508,6 +511,78 @@ class Dialog:
                 elif isinstance(key, str) and key.isprintable():
                     buf.insert(cursor, key)
                     cursor += 1
+        finally:
+            curses.curs_set(0)
+
+    # -- multi-field form --------------------------------------------------
+    def ask_form(self, title: str, fields):
+        """Ask for several values at once.
+
+        *fields* is a list of (label, default). Returns a list of strings in the
+        same order, or None when cancelled. Tab / arrow keys move between
+        fields, Enter on the last one accepts everything - that is what makes it
+        usable on a phone keyboard.
+        """
+        if not fields:
+            return []
+        height = min(len(fields) * 2 + 4, 20)
+        width = min(self.app.stdscr.getmaxyx()[1] - 2, 78)
+        win = self.make_window(height, width, title, min_width=30)
+        h, w = win.getmaxyx()
+        buffers = [list(str(default)) for _label, default in fields]
+        cursors = [len(buffer) for buffer in buffers]
+        current = 0
+        curses.curs_set(1)
+        try:
+            while True:
+                for index, (label, _default) in enumerate(fields):
+                    row = 2 + index * 2
+                    if row >= h - 2:
+                        break
+                    marker = ">" if index == current else " "
+                    safe_addstr(win, row, 2,
+                                clip("%s %s" % (marker, label), w - 4),
+                                self.app.cs.dialog)
+                    text = "".join(buffers[index])
+                    safe_addstr(win, row + 1, 4,
+                                clip(text, w - 6).ljust(w - 6),
+                                self.app.cs.dialog_input)
+                safe_addstr(win, h - 2, 2,
+                            clip("Tab = next field   Enter = save   Esc = cancel",
+                                 w - 4),
+                            self.app.cs.status_bar | self.app.cs.dialog)
+                row = 2 + current * 2 + 1
+                try:
+                    win.move(min(row, h - 2), min(4 + cursors[current], w - 3))
+                except curses.error:
+                    pass
+                win.refresh()
+                key = win.get_wch()
+                if key in ("\n", "\r", curses.KEY_ENTER):
+                    if current >= len(fields) - 1:
+                        self.close(win)
+                        return ["".join(buffer) for buffer in buffers]
+                    current += 1
+                elif key == "\x1b":
+                    self.close(win)
+                    return None
+                elif key in ("\t", curses.KEY_DOWN):
+                    current = (current + 1) % len(fields)
+                elif key == "\x1b[Z" or key == curses.KEY_UP:
+                    current = (current - 1) % len(fields)
+                elif key in (curses.KEY_BACKSPACE, "\x7f", "\b"):
+                    if cursors[current] > 0:
+                        del buffers[current][cursors[current] - 1]
+                        cursors[current] -= 1
+                elif key == curses.KEY_LEFT:
+                    cursors[current] = max(0, cursors[current] - 1)
+                elif key == curses.KEY_RIGHT:
+                    cursors[current] = min(len(buffers[current]), cursors[current] + 1)
+                elif key == "\x15":
+                    buffers[current], cursors[current] = [], 0
+                elif isinstance(key, str) and key.isprintable():
+                    buffers[current].insert(cursors[current], key)
+                    cursors[current] += 1
         finally:
             curses.curs_set(0)
 
@@ -1011,6 +1086,16 @@ class App:
         self._wins = None
         self._win_geom = None
         self._geom_state = {}
+        # Touch layer: the project engine, the current button layout and the
+        # screen rows the bars were last drawn on. Keeping the rows here is
+        # what makes a tap land on the right button.
+        self.projects_runner = projects_mod.Runner()
+        self._key_buttons = []
+        self._key_bar_top = -1
+        self._project_bar = None
+        self._project_bar_top = -1
+        self._project = None
+        self._project_dir = ""
         self._mode_override = "auto"
         self._dir_stamps = {}
         self._dragging = False
@@ -1287,8 +1372,8 @@ class App:
             safe_addstr(stdscr, maxy - 2, 0, clip(status, usable_w), curses.A_BOLD)
         else:
             safe_addstr(stdscr, maxy - 2, 0, clip(status, usable_w), cs.dim)
-        keys = ("1 Help  2 Refresh  3 View  4 Edit  5 Copy  6 Move  7 MkDir  8 Delete  9 Menu  10 Quit")
-        safe_addstr(stdscr, maxy - 1, 0, clip(keys, usable_w), cs.func_bar)
+        self._draw_touch_bars(stdscr, maxy, usable_w, cs)
+
         # Paint order matters: stdscr.erase() blanks the whole virtual screen,
         # so stdscr must be copied to newscr *before* the overlapping panel
         # windows, otherwise the blank stdscr lines win and panels vanish.
@@ -1312,6 +1397,75 @@ class App:
             self._draw_drag_bar(stdscr, body_top, body_h, usable_w, cs)
         curses.doupdate()
 
+    # -- touch bars --------------------------------------------------------
+    def _project_status(self):
+        """What the project engine says about the active folder (cached)."""
+        path = self.panel.path
+        if path != self._project_dir:
+            self._project_dir = path
+            try:
+                self._project = projects_mod.detect(path)
+            except Exception as exc:            # detection must never break draw
+                self.log.debug("project detect failed", exc=exc)
+                self._project = None
+        if self._project is None:
+            return None, {}
+        try:
+            status = self.projects_runner.status(path)
+        except Exception:
+            status = {}
+        return self._project, status
+
+    def _draw_touch_bars(self, stdscr, maxy: int, usable_w: int, cs) -> None:
+        """Draw the tappable key bar (and the project bar when there is one).
+
+        Rows are remembered in ``self._key_bar_top`` / ``self._project_bar_top``
+        so ``hit_bar()`` can turn a tap into the right action.
+        """
+        project, status = self._project_status()
+        running = bool(status.get("running"))
+
+        # Key bar: as many rows as the width needs, pinned to the bottom.
+        buttons = touchbar.layout_keys(usable_w, project_running=running)
+        rows = 1 + max((button.row for button in buttons), default=0)
+        top = maxy - rows
+        for button in buttons:
+            row = top + button.row
+            if row >= maxy:
+                continue
+            attr = cs.func_bar
+            if not button.enabled:
+                attr = cs.dim
+            safe_addstr(stdscr, row, button.x,
+                        clip(button.render(), max(0, usable_w - button.x)), attr)
+        self._key_buttons = buttons
+        self._key_bar_top = top
+
+        # Project bar: one row above the key bar, only inside a project.
+        self._project_bar = None
+        self._project_bar_top = -1
+        if project is not None and top - 1 >= 2:
+            bar = touchbar.ProjectBar.build(project, status, usable_w)
+            bar_top = top - 1
+            attr = cs.title if running else cs.dim
+            safe_addstr(stdscr, bar_top, 0, clip(bar.text, usable_w), attr)
+            self._project_bar = bar
+            self._project_bar_top = bar_top
+
+    def hit_bar(self, mx: int, my: int):
+        """Which bar button is at (mx, my)?
+
+        Returns (kind, action_or_Button) or (None, None). "kind" is "key" for a
+        key bar cell and "project" for the project strip's single button.
+        """
+        for button in self._key_buttons:
+            if button.contains(mx, my, self._key_bar_top):
+                return "key", button.action
+        bar = self._project_bar
+        if bar is not None and bar.button is not None:
+            if bar.button.contains(mx, my, self._project_bar_top):
+                return "project", bar
+        return None, None
     def _draw_panel_switcher(self, stdscr, body_top: int, usable_w: int, cs) -> None:
         labels = []
         for idx, panel in enumerate(self.panels):
@@ -1425,6 +1579,31 @@ class App:
             _id, mx, my, _mz, bstate = state
         except (TypeError, ValueError):
             return
+
+        # The bars come first: on a phone they are the only way to reach the
+        # actions, and they must never be interpreted as a panel row.
+        pressed = (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED
+                   | curses.BUTTON1_RELEASED
+                   | getattr(curses, "BUTTON1_DOUBLE_CLICKED", 0))
+        if bstate & pressed:
+            kind, target = self.hit_bar(mx, my)
+            if kind == "key":
+                self._mouse_down = False
+                self._dragging = False
+                self._drag_accum = ""
+                self._press_x = self._press_y = None
+                self._drag_from_x = self._drag_from_y = None
+                self.run_key_action(target)
+                return
+            if kind == "project":
+                self._mouse_down = False
+                self._dragging = False
+                self._drag_accum = ""
+                self._press_x = self._press_y = None
+                self._drag_from_x = self._drag_from_y = None
+                self.project_action(target)
+                return
+
         mode = self._layout_mode()
         panel = self.panel
         release = (curses.BUTTON1_RELEASED | getattr(curses, "BUTTON1_CLICKED", 0))
@@ -2381,6 +2560,429 @@ class App:
         actions[choice]()
         self.touch_all()
 
+    # -- touch actions -----------------------------------------------------
+    def run_key_action(self, action: str) -> None:
+        """Run one of the key-bar buttons. Same code path a key would take."""
+        mapping = {
+            "help": self.show_help,
+            "refresh": self._refresh_both,
+            "view": lambda: self.view_file(self.panel.current()),
+            "copy": lambda: self.transfer_files("copy"),
+            "move": lambda: self.transfer_files("move"),
+            "mkdir": self.new_folder,
+            "delete": self.delete_files,
+            "menu": self.quick_menu,
+            "quit": self.request_quit,
+            "projects": self.projects_menu,
+        }
+        handler = mapping.get(action)
+        if handler is None:
+            return
+        try:
+            handler()
+        except Exception as exc:
+            self.log.error("touch action failed", action=action, exc=exc)
+            self.info("Error: %s" % exc, "error")
+        self.touch_all()
+
+    def _refresh_both(self) -> None:
+        for panel in self.panels:
+            panel.refresh()
+        self.info("Refreshed")
+
+    def project_action(self, bar) -> None:
+        """Tapped the project strip: start it, or open its menu when running."""
+        project = self._project
+        if project is None:
+            return
+        status = self.projects_runner.status(project.path)
+        if status.get("running"):
+            self.projects_menu()
+            return
+        self.start_project(project)
+
+    def start_project(self, project) -> None:
+        """Start *project*, choosing a free port and reporting the URL."""
+        if not project.command:
+            self.info("No run command was detected for this folder", "error")
+            return
+        port = project.port
+        result = self.projects_runner.start(project.path, project.command, port)
+        self.touch_all()
+        if not result.get("ok"):
+            detail = result.get("error", "unknown error")
+            log_tail = result.get("log") or ""
+            if log_tail:
+                detail += "  |  " + log_tail.splitlines()[-1][:90]
+            self.info("Could not start: %s" % detail, "error")
+            return
+        if result.get("already"):
+            self.info("Already running on port %s" % result.get("port"))
+            return
+        chosen = result.get("port") or 0
+        note = ""
+        if chosen and project.port and chosen != project.port:
+            note = "  (port %d was busy)" % project.port
+        self.info("Started %s on %s%s" % (project.name,
+                                          result.get("url") or "no port", note), "ok")
+        self.log.info("project started", path=project.path,
+                      port=chosen, pid=result.get("pid"))
+
+    def stop_project(self, path: str) -> None:
+        result = self.projects_runner.stop(path)
+        self.touch_all()
+        if result.get("killed"):
+            self.info("Stopped. Port %s freed." % (result.get("port") or "-"), "ok")
+        else:
+            self.info("Nothing was running there")
+
+    def projects_menu(self) -> None:
+        """Everything about projects, ports and updates, reachable by finger."""
+        while True:
+            project, status = self._project_status()
+            running = bool(status.get("running"))
+            labels = []
+            actions = []
+
+            if project is not None:
+                head = "%s  (%s)" % (project.name, project.kind)
+                if running:
+                    head += "  RUNNING :%s" % status.get("port")
+                labels.append(head)
+                actions.append(None)
+                labels.append("---")
+                actions.append(None)
+                if project.command:
+                    if running:
+                        labels.append("Stop this project")
+                        actions.append("stop")
+                        labels.append("Show the log")
+                        actions.append("log")
+                    else:
+                        labels.append("Run this project")
+                        actions.append("run")
+                    labels.append("Change its port / run command")
+                    actions.append("edit")
+                if project.git:
+                    labels.append("Check for a newer version (git)")
+                    actions.append("check")
+                    labels.append("Update now (git pull --ff-only)")
+                    actions.append("pull")
+                labels.append("Clone a git repository into this folder")
+                actions.append("clone")
+            else:
+                labels.append("Not a project folder")
+                actions.append(None)
+                labels.append("---")
+                actions.append(None)
+                labels.append("Clone a git repository here")
+                actions.append("clone")
+
+            labels.append("---")
+            actions.append(None)
+            labels.append("Open ports  (%d listening)"
+                          % len(projects_mod.listening_ports()))
+            actions.append("ports")
+            labels.append("All projects I have started")
+            actions.append("all")
+            labels.append("Layout: left-right / stacked")
+            actions.append("layout")
+            labels.append("Close")
+            actions.append(None)
+
+            choice = menu(self, "Projects", labels)
+            self.touch_all()
+            if choice is None or actions[choice] is None:
+                return
+            what = actions[choice]
+            if what == "run":
+                self.start_project(project)
+            elif what == "stop":
+                self.stop_project(project.path)
+            elif what == "log":
+                self.show_project_log(project)
+            elif what == "edit":
+                self.edit_project(project)
+            elif what == "check":
+                self.check_updates(project)
+            elif what == "pull":
+                self.check_updates(project, do_pull=True)
+            elif what == "clone":
+                self.clone_here(project.path if project else self.panel.path)
+            elif what == "ports":
+                self.ports_menu()
+            elif what == "all":
+                self.all_projects_menu()
+            elif what == "layout":
+                self.toggle_layout()
+
+    def show_project_log(self, project) -> None:
+        lines = self.projects_runner.tail(project.path, 200)
+        if not lines:
+            self.info("The log is empty so far")
+            return
+        self.show_text_window("Log: %s" % project.name, lines)
+
+    def show_text_window(self, title: str, lines) -> None:
+        """A scrollable read-only window, reusing the file viewer's look."""
+        height = min(self.stdscr.getmaxyx()[0] - 2, 22)
+        width = min(self.stdscr.getmaxyx()[1] - 2, 96)
+        win = Dialog(self).make_window(height, width, title, min_width=30)
+        top = max(0, len(lines) - (height - 3))
+        while True:
+            win.erase()
+            h, w = win.getmaxyx()
+            for row in range(min(h - 2, len(lines) - top)):
+                text = lines[top + row]
+                win.addnstr(1 + row, 1, text, w - 2, curses.A_NORMAL)
+            win.addnstr(h - 1, 1, " \u2191\u2193 scroll   q close ", w - 2,
+                        curses.A_REVERSE)
+            win.noutrefresh()
+            curses.doupdate()
+            key = self.read_key()
+            if key in ("q", "\x1b", "\x03") or key == curses.KEY_F10:
+                break
+            if key in (curses.KEY_DOWN, "j"):
+                top = min(max(0, len(lines) - (h - 2)), top + 1)
+            elif key in (curses.KEY_UP, "k"):
+                top = max(0, top - 1)
+            elif key in (curses.KEY_NPAGE, " "):
+                top = min(max(0, len(lines) - (h - 2)), top + (h - 3))
+            elif key in (curses.KEY_PPAGE,):
+                top = max(0, top - (h - 3))
+        Dialog(self).close(win)
+        self.touch_all()
+
+    def edit_project(self, project) -> None:
+        """Let the user set the run command and the port by hand."""
+        current_port = str(project.port or "")
+        values = self.dialog.ask_form(
+            "Project settings",
+            [("Run command", project.command or ""),
+             ("Port", current_port),
+             ("Name", project.name)],
+        )
+        if values is None:
+            self.touch_all()
+            return
+        command, port_text, name = values
+        command = command.strip()
+        try:
+            port = int(port_text.strip() or "0")
+        except ValueError:
+            port = 0
+        data = {"run": command, "port": port, "kind": project.kind,
+                "name": name.strip() or project.name}
+        target = os.path.join(project.path, projects_mod.SELF_DESCRIPTOR)
+        try:
+            with open(target, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=1)
+            self.info("Saved %s" % projects_mod.SELF_DESCRIPTOR, "ok")
+        except OSError as exc:
+            self.info("Could not save: %s" % exc, "error")
+        self._project_dir = ""          # force re-detection
+        self.touch_all()
+
+    def check_updates(self, project, do_pull: bool = False) -> None:
+        self.info("Talking to git\u2026")
+        self.draw()
+        state = projects_mod.git_state(project.path)
+        if not state.get("repo"):
+            self.info("This folder is not a git checkout", "error")
+            return
+        if not state.get("remote"):
+            self.info("No origin remote configured", "error")
+            return
+        behind = int(state.get("behind") or 0)
+        ahead = int(state.get("ahead") or 0)
+        if state.get("error"):
+            self.info(state["error"], "error")
+            return
+        if not behind and not ahead:
+            self.info("Up to date with origin/%s" % (state.get("branch") or "?"), "ok")
+            return
+        if do_pull:
+            result = projects_mod.pull(project.path)
+            if result.get("ok"):
+                self.info("Updated", "ok")
+            else:
+                self.info("Update failed: %s" % (result.get("error") or "?"), "error")
+            self._project_dir = ""
+            return
+        if behind:
+            self.info("%d commit(s) behind origin \u2014 choose Update to pull" % behind)
+        else:
+            self.info("%d local commit(s) not pushed yet" % ahead)
+
+    def clone_here(self, folder: str) -> None:
+        url = self.dialog.ask("Clone repository", "Git URL (https://github.com/\u2026):", "")
+        if not url:
+            self.touch_all()
+            return
+        name = os.path.basename(url.rstrip("/")).replace(".git", "") or "repo"
+        default = os.path.join(folder, name)
+        target = self.dialog.ask("Clone into", "Folder:", default) or default
+        target = fsops.path_expand(target, folder)
+        self.info("Cloning\u2026 this can take a while")
+        self.draw()
+        result = projects_mod.clone(url.strip(), target)
+        if result.get("ok"):
+            self.info("Cloned into %s" % target, "ok")
+            self.panel.path = target
+            self.panel.refresh()
+        else:
+            self.info("Clone failed: %s" % (result.get("error") or "?"), "error")
+        self.touch_all()
+
+    def ports_menu(self) -> None:
+        """Every listening port, with the two things you always want to do."""
+        listening = projects_mod.listening_ports()
+        owned = self.projects_runner.all()
+        labels = ["Refresh the list", "---"]
+        actions = ["refresh", None]
+        for entry in owned:
+            port = entry.get("port") or 0
+            if not port:
+                continue
+            state = "running" if entry.get("running") else "stopped"
+            labels.append(":%-5d %-18s %s" % (port, entry.get("name", "?")[:18], state))
+            actions.append(("managed", entry["path"]))
+        for port in sorted(listening):
+            if any((entry.get("port") or 0) == port for entry in owned):
+                continue
+            labels.append(":%-5d (something else is using it)" % port)
+            actions.append(("foreign", port))
+        if len(labels) == 2:
+            labels.append("Nothing is listening")
+            actions.append(None)
+        labels.append("---")
+        actions.append(None)
+        labels.append("Change the port of the active project")
+        actions.append(("reassign", None))
+        labels.append("Close")
+        actions.append(None)
+
+        choice = menu(self, "Open ports", labels)
+        self.touch_all()
+        if choice is None or actions[choice] is None:
+            return
+        what = actions[choice]
+        if what == "refresh":
+            return
+        if what == ("reassign", None):
+            self.change_port()
+            return
+        kind, payload = what
+        if kind == "managed":
+            entry = next((item for item in owned if item["path"] == payload), {})
+            self.port_actions(payload, entry.get("name", "?"), entry.get("port") or 0)
+        else:
+            self.foreign_port_actions(payload)
+
+    def port_actions(self, path: str, name: str, port: int) -> None:
+        labels = ["Open %s in the browser view" % ("http://localhost:%d" % port),
+                  "Free the port and stop the project",
+                  "Move this project to another port",
+                  "Close"]
+        choice = menu(self, ":%d  %s" % (port, name), labels)
+        self.touch_all()
+        if choice == 0:
+            self.info("Copy this into the browser: http://localhost:%d" % port)
+        elif choice == 1:
+            self.stop_project(path)
+        elif choice == 2:
+            self.change_port(path)
+
+    def foreign_port_actions(self, port: int) -> None:
+        labels = ["Free it (kill whatever owns it)", "Close"]
+        choice = menu(self, "Port %d" % port, labels)
+        self.touch_all()
+        if choice == 0:
+            if projects_mod.free_port(port):
+                self.info("Port %d is free now" % port, "ok")
+            else:
+                self.info("Could not free port %d \u2014 it may belong to another app" % port,
+                          "error")
+
+    def change_port(self, path: str = None) -> None:
+        """Pick a new port for a project and restart it there.
+
+        This is the answer to a stubborn browser cache: move the port, reload,
+        done - no cache clearing.
+        """
+        path = path or (self._project.path if self._project else self.panel.path)
+        project = projects_mod.detect(path)
+        if project is None:
+            self.info("This folder is not a project", "error")
+            return
+        status = self.projects_runner.status(path)
+        suggestion = projects_mod.find_free_port(
+            (status.get("port") or project.port or 8000) + 1)
+        text = self.dialog.ask("New port", "Port number:", str(suggestion))
+        if not text:
+            self.touch_all()
+            return
+        try:
+            port = int(text.strip())
+        except ValueError:
+            self.info("That is not a number", "error")
+            return
+        was_running = status.get("running")
+        if was_running:
+            self.stop_project(path)
+        project.port = port
+        # Persist the choice so the next run uses it.
+        target = os.path.join(path, projects_mod.SELF_DESCRIPTOR)
+        data = {"run": project.command, "port": port, "kind": project.kind}
+        try:
+            with open(target, "w", encoding="utf-8") as handle:
+                json.dump(data, handle, ensure_ascii=False, indent=1)
+        except OSError:
+            pass
+        if was_running:
+            project.port = port
+            self.start_project(project)
+        else:
+            self.info("Port set to %d" % port, "ok")
+        self._project_dir = ""
+
+    def all_projects_menu(self) -> None:
+        entries = self.projects_runner.all()
+        labels = []
+        actions = []
+        for entry in entries:
+            port = entry.get("port") or 0
+            labels.append("%-16s %-5s %s" % (entry.get("name", "?")[:16],
+                                            (":%d" % port) if port else "",
+                                            "running" if entry.get("running") else "stopped"))
+            actions.append(entry)
+        if not labels:
+            labels.append("No projects started yet")
+            actions.append(None)
+        labels.append("---")
+        actions.append(None)
+        labels.append("Close")
+        actions.append(None)
+        choice = menu(self, "Projects I have run", labels)
+        self.touch_all()
+        if choice is None or actions[choice] is None:
+            return
+        entry = actions[choice]
+        if entry.get("running"):
+            self.stop_project(entry["path"])
+        else:
+            project = projects_mod.detect(entry["path"])
+            if project is not None:
+                self.start_project(project)
+
+    def toggle_layout(self) -> None:
+        if self._layout_mode() == "split":
+            self._mode_override = "stack"
+        else:
+            self._mode_override = "split"
+        self.info("Layout: %s" % self._layout_mode())
+        self.touch_all()
+
     def quick_menu(self) -> None:
         """One flat menu - handy on a phone where F-keys are unreachable."""
         labels = [
@@ -2606,6 +3208,13 @@ class App:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def termux_detected() -> bool:
+    """True inside the Termux app, where mouse reporting bites."""
+    if os.environ.get("TERMUX_VERSION"):
+        return True
+    return os.path.isdir("/data/data/com.termux") and os.path.isdir("/system/app")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="twinpane",
@@ -2620,10 +3229,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="colour mode (default: auto)")
     parser.add_argument("--layout", choices=["auto", "split", "stack"], default="auto",
                         help="panel layout: side-by-side, one-panel (phones), or auto")
-    parser.add_argument("--mouse", dest="mouse", action="store_true", default=True,
-                        help="enable mouse/touch support (default: on)")
+    # On Termux the mouse-reporting sequences fight the on-screen keyboard: the
+    # keyboard covers the key bar and every tap is swallowed as a mouse report.
+    # So touch reporting is off by default there, and --mouse turns it back on.
+    parser.add_argument("--mouse", dest="mouse", action="store_true",
+                        default=(False if termux_detected() else True),
+                        help="enable mouse/touch support (default: on, except in Termux)")
     parser.add_argument("--no-mouse", dest="mouse", action="store_false",
-                        help="disable mouse reporting (old SSH clients)")
+                        help="disable mouse reporting (default in Termux)")
     parser.add_argument("-q", "--quiet", action="store_true",
                         help="no start-up hint")
     parser.add_argument("--version", action="version",
