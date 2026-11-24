@@ -115,6 +115,59 @@ public final class TermuxBridge {
         return System.currentTimeMillis() - beat.lastModified() < 150000;
     }
 
+    /**
+     * Which link in the chain is broken, in plain words.
+     *
+     * <p>This exists because "it does not work" cost a whole evening once. The
+     * four things that can be wrong are checked in order, and the first one
+     * that is wrong is the only thing the user is told.
+     */
+    public static final class Diagnosis {
+        public final String what;
+        public final String fix;
+
+        Diagnosis(String what, String fix) {
+            this.what = what;
+            this.fix = fix;
+        }
+
+        public boolean isReady() {
+            return fix == null;
+        }
+    }
+
+    public static Diagnosis diagnose() {
+        File shared = Environment.getExternalStorageDirectory();
+        if (shared == null || !shared.canRead() || shared.list() == null) {
+            return new Diagnosis("This app cannot read the phone's storage.",
+                    "Grant \"All files access\" to Twin-Pane, then come back.");
+        }
+        File bridge = bridgeDir();
+        File requests = new File(bridge, "requests");
+        if (!bridge.isDirectory() && !bridge.mkdirs()) {
+            return new Diagnosis("The bridge folder could not be created.",
+                    "Create it by hand in Termux: mkdir -p /sdcard/TwinPane/bridge");
+        }
+        if (!requests.isDirectory() && !requests.mkdirs()) {
+            return new Diagnosis("The bridge folder has no requests/ subfolder.",
+                    "In Termux: mkdir -p /sdcard/TwinPane/bridge/{requests,work,results}");
+        }
+        File beat = new File(bridge, "worker.json");
+        if (!beat.isFile()) {
+            return new Diagnosis("The Termux worker has never run.",
+                    "Open Termux and run:  twinpane-bridge");
+        }
+        long age = System.currentTimeMillis() - beat.lastModified();
+        if (age > 150000) {
+            long minutes = age / 60000;
+            return new Diagnosis("The Termux worker stopped " + minutes
+                    + " minute" + (minutes == 1 ? "" : "s") + " ago.",
+                    "Open Termux and run:  twinpane-bridge\n\n"
+                            + "To keep it alive, run:  termux-wake-lock");
+        }
+        return new Diagnosis(null, null);
+    }
+
     /** Where Termux's own home is, as reported by the worker (or guessed). */
     public static String termuxHome() {
         JSONObject beat = readJson(new File(bridgeDir(), "worker.json"));

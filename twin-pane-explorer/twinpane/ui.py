@@ -1352,10 +1352,17 @@ class App:
             return
         cs = self.cs
         usable_w = maxx - 1
-        safe_addstr(stdscr, 0, 0, clip(" %s " % T(APP_TITLE), max(18, usable_w - 44)),
-                    cs.title)
+        # Header: keep the app name whole.  On a phone there is no room for
+        # both, so the key hints are dropped and the touch bar below carries
+        # the same actions anyway ("Twin-Pane Ex|Tab:switch" looked broken).
+        app_name = T(APP_TITLE)
         right_hint = "Tab:switch  F1:help  F10:quit "
-        safe_addstr(stdscr, 0, max(0, usable_w - len(right_hint)), right_hint, cs.title)
+        if len(app_name) + len(right_hint) + 2 <= usable_w:
+            safe_addstr(stdscr, 0, 0, " %s " % app_name, cs.title)
+            safe_addstr(stdscr, 0, max(0, usable_w - len(right_hint)), right_hint,
+                        cs.title)
+        else:
+            safe_addstr(stdscr, 0, 0, clip(" %s " % app_name, usable_w), cs.title)
         body_top, body_h, usable_w = self._layout()
         status = self.msg or ("Tab=switch  c/F5=copy  m/F6=move  Z=zip  u=unzip  "
                               "Q=menu  F10=quit   |   selected: %d"
@@ -1479,8 +1486,11 @@ class App:
             x += len(label) + 1
             if x >= usable_w:
                 break
+        # Only draw the hint when nothing is left where it would go; otherwise
+        # it used to be printed straight over the second panel's name.
         hint = " Tab: next panel  F9: layout "
-        safe_addstr(stdscr, body_top, max(0, usable_w - len(hint)), hint, cs.dim)
+        if x + len(hint) <= usable_w:
+            safe_addstr(stdscr, body_top, usable_w - len(hint), hint, cs.dim)
 
     def _draw_drag_bar(self, stdscr, body_top: int, body_h: int, usable_w: int, cs) -> None:
         """Visual feedback while a finger/mouse is dragging between panels."""
@@ -2566,6 +2576,7 @@ class App:
         mapping = {
             "help": self.show_help,
             "refresh": self._refresh_both,
+            "sort": self.sort_quick,
             "view": lambda: self.view_file(self.panel.current()),
             "copy": lambda: self.transfer_files("copy"),
             "move": lambda: self.transfer_files("move"),
@@ -2995,6 +3006,7 @@ class App:
             "zip   - compress selection",
             "unzip - extract archive",
             "View / open",
+            "Sort this panel  (name / date / size / type)",
             "Switch layout (left-right / stacked)",
             "Switch panel (Tab)",
             "Refresh both panels",
@@ -3017,6 +3029,7 @@ class App:
             lambda: self.create_archive(".zip"),
             lambda: self.extract_archive(self.panel.current(), True),
             self.actions_open,
+            self.sort_menu,
             self.cycle_layout,
             self._swap_panel,
             self._refresh_all,
@@ -3108,18 +3121,90 @@ class App:
         self.panel.refresh()
         self.touch_all()
 
+    #: Human names for the sort keys, in the order the menu shows them.
+    SORT_LABELS = [("name", "Name"), ("size", "Size"),
+                   ("mtime", "Date"), ("ext", "Type")]
+
     def sort_menu(self) -> None:
-        labels = ["By name", "By size", "By date", "By extension"]
-        keys = ["name", "size", "mtime", "ext"]
-        choice = menu(self, "Sort by", labels)
-        if choice is None:
-            return
-        key = keys[choice]
-        if self.panel.sort_key == key:
-            self.panel.sort_reverse = not self.panel.sort_reverse
+        """Sort the active panel.
+
+        Each panel keeps its own order, so the Termux panel can be by date while
+        the phone panel is by name. Choosing the order a panel is already using
+        flips its direction - the same as tapping a column header everywhere
+        else.
+        """
+        panel = self.panel
+        marks = {"name": "A\u2192Z / Z\u2192A", "size": "small\u2192large / large\u2192small",
+                 "mtime": "old\u2192new / new\u2192old", "ext": "A\u2192Z / Z\u2192A"}
+        current = "%s \u00b7 %s" % (dict(self.SORT_LABELS).get(panel.sort_key,
+                                                              panel.sort_key),
+                                     "descending" if panel.sort_reverse
+                                     else "ascending")
+
+        while True:
+            labels = []
+            for key, label in self.SORT_LABELS:
+                if key == panel.sort_key:
+                    arrow = "\u2193" if panel.sort_reverse else "\u2191"
+                    labels.append("%s %s  (%s)" % (arrow, label, marks[key]))
+                else:
+                    labels.append("   %s" % label)
+            labels.append("---")
+            labels.append("Folders first: %s" % ("on" if True else "off"))
+            labels.append("Close")
+
+            choice = menu(self, "Sort by \u00b7 %s" % current, labels)
+            if choice is None:
+                self.touch_all()
+                return
+            if choice == len(self.SORT_LABELS) + 1:
+                return
+            if choice == len(self.SORT_LABELS):
+                continue                     # the informational line
+            key = self.SORT_LABELS[choice][0]
+            if panel.sort_key == key:
+                panel.sort_reverse = not panel.sort_reverse
+            else:
+                panel.sort_key, panel.sort_reverse = key, False
+            panel.refresh()
+            self._save_sort(panel)
+            self.touch_all()
+            current = "%s \u00b7 %s" % (dict(self.SORT_LABELS)[key],
+                                        "descending" if panel.sort_reverse
+                                        else "ascending")
+
+    def _save_sort(self, panel) -> None:
+        """Remember the choice so the next start looks the same."""
+        try:
+            self.cfg.set("ui.sort_key", panel.sort_key)
+            self.cfg.set("ui.sort_reverse", panel.sort_reverse)
+        except Exception as exc:             # a config write must never break sorting
+            self.log.debug("could not save the sort order", exc=exc)
+
+    def sort_quick(self) -> None:
+        """One tap on the bar cycles: name -> date -> size -> back to name.
+
+        Reaching a menu is fine when you want to be precise; most of the time you
+        just want the other order, and that is what this gives you.
+        """
+        panel = self.panel
+        order = ["name", "mtime", "size"]
+        try:
+            index = order.index(panel.sort_key)
+        except ValueError:
+            index = -1
+        if index < 0:
+            panel.sort_key, panel.sort_reverse = "name", False
+        elif panel.sort_reverse:
+            panel.sort_key = order[(index + 1) % len(order)]
+            panel.sort_reverse = False
         else:
-            self.panel.sort_key, self.panel.sort_reverse = key, False
-        self.panel.refresh()
+            panel.sort_reverse = True
+        panel.refresh()
+        self._save_sort(panel)
+        name = dict(self.SORT_LABELS).get(panel.sort_key, panel.sort_key)
+        self.info("%s \u00b7 %s" % (name, "descending" if panel.sort_reverse
+                                     else "ascending"))
         self.touch_all()
 
     def edit_config(self) -> None:

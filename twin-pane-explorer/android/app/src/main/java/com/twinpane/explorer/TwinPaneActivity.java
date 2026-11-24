@@ -660,24 +660,39 @@ public class TwinPaneActivity extends Activity {
     }
 
     private void showWorkerHelp() {
-        final String command = "twinpane-bridge";
+        // Say which link is broken, not just "it does not work".
+        TermuxBridge.Diagnosis diagnosis = TermuxBridge.diagnose();
+        String title;
+        String body;
+        if (diagnosis.isReady()) {
+            title = "The Termux worker is ready";
+            body = "A worker is running, so the Termux panel should open.\n\n"
+                    + "If it still does not, close this app and open it again.";
+            new AlertDialog.Builder(this)
+                    .setTitle(title)
+                    .setMessage(body)
+                    .setPositiveButton("OK", null)
+                    .show();
+            return;
+        }
+        title = diagnosis.what;
+        body = diagnosis.fix + "\n\n"
+                + "To keep the worker alive in the background:\n\n"
+                + "sv-enable twinpane-bridge\n\n"
+                + "The phone panel needs none of this — it always works.";
+        final String fix = diagnosis.fix;
         new AlertDialog.Builder(this)
-                .setTitle("Termux panel is inactive")
-                .setMessage("To read Termux's own files, a small worker must run "
-                        + "inside Termux. Open Termux and run:\n\n"
-                        + command + "\n\n"
-                        + "Or in the background, so it survives:\n\n"
-                        + "sv-enable twinpane-bridge\n\n"
-                        + "The phone panel needs none of this — it always works.")
-                .setPositiveButton("Got it", null)
-                .setNegativeButton("Copy command", new DialogInterface.OnClickListener() {
+                .setTitle(title)
+                .setMessage(body)
+                .setPositiveButton("OK", null)
+                .setNegativeButton("Copy the fix", new DialogInterface.OnClickListener() {
                     @Override
                     public void onClick(DialogInterface dialog, int which) {
                         android.content.ClipboardManager clipboard =
                                 (android.content.ClipboardManager) getSystemService(
                                         CLIPBOARD_SERVICE);
-                        clipboard.setPrimaryClip(
-                                android.content.ClipData.newPlainText("termux", command));
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText(
+                                "termux", fix));
                         toast("Copied");
                     }
                 })

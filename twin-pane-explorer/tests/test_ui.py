@@ -443,18 +443,33 @@ def test_auto_refresh_shows_external_changes(tree):
 
 
 def test_layout_switch_from_f9_menu(tree):
+    """Choosing "Switch layout" in the F9 menu must really switch the layout.
+
+    This one earns its keep twice over: it catches the row being missing, and
+    it catches label/action misalignment (a wrong handler opens a different
+    dialog instead of announcing the new layout).
+    """
+    import re as _re
     termux, sdcard = tree
     child, scr = start(None, termux, sdcard)
     try:
         child.send("\x1b[20~")            # F9 menu
-        scr.pump(child, 0.8)
-        assert "Switch layout" in scr.text()
-        for _ in range(11):
-            child.send("\x1b[B")
-            scr.pump(child, 0.08)
-        child.send("\r")
         scr.pump(child, 0.9)
-        assert "Layout" in scr.text() or "columns" in scr.text(), scr.text()
+        menu_text = scr.text()
+        assert "Switch layout" in menu_text
+        # Read the printed row number instead of hard-coding the number of
+        # Down presses: adding a menu row used to break this test.
+        line = next(l for l in menu_text.split("\n") if "Switch layout" in l)
+        number = int(_re.search(r"(\d+)\.", line).group(1))
+        for _ in range(number - 1):     # the cursor already sits on row 1
+            child.send("\x1b[B")
+            scr.pump(child, 0.05)
+        child.send("\r")
+        scr.pump(child, 1.2)
+
+        after = scr.text()
+        # default is "auto"; one step forward is the two-column layout
+        assert "Layout:" in after and "columns" in after, after
     finally:
         child.send("q")
         child.close(force=True)
@@ -471,11 +486,16 @@ def test_phone_width_uses_stacked_layout(tree):
         child.send("\x0c")       # Ctrl+L: force a full redraw
         scr.pump(child, 1.0)
         text = scr.text()
-        # stacked mode draws a one-line panel switcher
-        assert "next panel" in text, text
-        assert "F9: layout" in text, text
-        # and the active panel gets the whole width (no second panel title)
+        # stacked mode draws a one-line panel switcher naming BOTH panels, so
+        # switching is discoverable without an F-key.  The "Tab: next panel"
+        # hint is only appended when there is room left over (it used to be
+        # printed on top of the second panel's name on a narrow screen).
+        switcher = next(l for l in text.split("\n") if "\u25b6" in l)
+        assert "\u25b8" in switcher, switcher      # the other panel is listed
+        # the active panel gets the whole width (no second panel title)
         assert text.count("Name") == 1, text
+        # the whole app name must survive; it used to be cut to "Twin-Pane Ex"
+        assert "Twin-Pane Explorer" in text, text
     finally:
         child.send("q")
         child.close(force=True)
@@ -518,6 +538,43 @@ def test_drag_between_panels_copies(tree):
         scr.pump(child, 1.5)
         assert (sdcard / "notes.txt").exists(), scr.text()
         assert (termux / "notes.txt").exists()   # drag copies, never moves
+    finally:
+        child.send("q")
+        child.close(force=True)
+
+def test_narrow_screen_keeps_app_name_whole(tree):
+    """The header used to clip to "Twin-Pane Ex" and glue the hints onto it."""
+    termux, sdcard = tree
+    child, scr = start(None, termux, sdcard)
+    try:
+        for width in (44, 52):
+            scr.screen.resize(26, width)
+            child.setwinsize(26, width)
+            scr.pump(child, 0.3)
+            child.send("\x0c")           # full redraw
+            scr.pump(child, 0.8)
+            header = scr.text().split("\n")[0]
+            assert "Twin-Pane Explorer" in header, (width, header)
+            assert "Exp" not in header.replace("Explorer", ""), (width, header)
+    finally:
+        child.send("q")
+        child.close(force=True)
+
+
+def test_switcher_hint_never_covers_a_panel_name(tree):
+    """Two panel names and the hint must not be printed on top of each other."""
+    termux, sdcard = tree
+    child, scr = start(None, termux, sdcard)
+    try:
+        scr.screen.resize(26, 52)
+        child.setwinsize(26, 52)
+        scr.pump(child, 0.3)
+        child.send("\x0c")
+        scr.pump(child, 0.9)
+        switcher = next(l for l in scr.text().split("\n") if "\u25b6" in l)
+        if "Tab: next panel" in switcher:
+            # when the hint fits it must start only after both names ended
+            assert switcher.index("Tab: next panel") > switcher.index("\u25b8"), switcher
     finally:
         child.send("q")
         child.close(force=True)
