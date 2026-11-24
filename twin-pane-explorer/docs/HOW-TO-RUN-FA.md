@@ -33,6 +33,88 @@ curl -fsSL https://github.com/HaadiTaba111/-/raw/main/twin-pane-explorer/scripts
 
 ---
 
+## 👆 لمس: نوار دکمه‌ها و منوی پروژه (v1.4.0)
+
+روی گوشی کلید `F` نداریم، پس نوار پایین حالا **دکمه‌های واقعی لمس** است:
+
+```
+┌─────────────────────────────────────────┐
+│  Help  Rfr  View  →Copy  Move           │   ← ردیف ۱
+│  Dir   Del  Proj  Menu   Quit           │   ← ردیف ۲ (زیر ۶۰ کاراکتر)
+└─────────────────────────────────────────┘
+```
+
+روی ترمینال پهن، همه در یک ردیف جا می‌شوند. هر دکمه با انگشت کار می‌کند —
+هیچ `F1`…`F10` لازم نیست.
+
+### نوار پروژه
+
+وقتی وارد پوشه‌ای می‌شوی که پروژه است، یک نوار بالای دکمه‌ها ظاهر می‌شود:
+
+```
+my-api  fastapi  git:main                              ▶ run
+```
+
+- **`▶ run`** بزن → سرور بالا می‌آید
+- وقتی در حال اجراست: `● run :8000` — بزن → منوی پروژه باز می‌شود
+- تشخیص خودکار از روی فایل‌ها:
+
+| فایل | نوع | دستور |
+|---|---|---|
+| `manage.py` | Django | `runserver` |
+| `next.config.*` | Next.js | `npm run dev` |
+| `vite.config.*` | Vite | `npm run dev` |
+| `requirements.txt` + FastAPI | FastAPI | `uvicorn` |
+| `package.json` | Node | `npm run dev` / `npm start` |
+| `docker-compose.yml` | Docker | `docker compose up` |
+| `go.mod` / `Cargo.toml` | Go / Rust | `go run .` / `cargo run` |
+
+اگر `.venv/` داشته باشد، از همان پایتون استفاده می‌کند.
+
+### پروژه خودش را معرفی کند
+
+در ریشه‌ی هر پروژه یک فایل `twinpane.project` بگذار:
+
+```json
+{"run": "uvicorn main:app --host 0.0.0.0 --port %(port)d", "port": 8000}
+```
+
+`%(port)d` با پورت انتخاب‌شده جایگزین می‌شود.
+
+### منوی `Proj` — همه‌چیز با انگشت
+
+- **Run** / **Stop** پروژه‌ی پوشه‌ی جاری
+- **Show the log** (اسکرول‌شدنی)
+- **Change its port / run command**
+- **Check for a newer version (git)** / **Update now**
+- **Clone a git repository here**
+- **Open ports** — لیست همه‌ی پورت‌های باز
+- **All projects I have started**
+
+### مدیریت پورت — جواب کش مرورگر
+
+منوی `Proj` → **Open ports**:
+
+```
+:8000  my-api              running
+:3000  (something else is using it)
+:5173  web                stopped
+```
+
+روی هر پورت بزنی: **آزاد کن** · **پورت را عوض کن** · **کپی لینک**
+
+«پورت را عوض کن» پروژه را روی پورت آزاد بعدی بالا می‌آورد و در
+`twinpane.project` ذخیره می‌کند. **بدون پاک‌کردن کش مرورگر.**
+
+اگر پورت درخواستی مشغول باشد، خودش پورت آزاد بعدی را انتخاب می‌کند و می‌گوید.
+
+### ماوس در ترمکس حالا خاموش است
+
+قبلاً ماوس/لمس روشن بود و با کیبورد ترمکس تعارض داشت (صفحه قفل می‌شد).
+حالا در ترمکس **پیش‌فرض خاموش** است. اگر خواستی: `twinpane --mouse`
+
+---
+
 ## 🚀 راه اول (توصیه‌شده): نصب خودکار در Termux
 
 یک دستور، همه‌چیز. اسکریپت خودش:
