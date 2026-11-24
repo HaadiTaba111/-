@@ -48,18 +48,38 @@ MAX_RESULTS = 200
 # ---------------------------------------------------------------------------
 
 def default_bridge_dir() -> str:
-    """``/sdcard/TwinPane/bridge``, or a Termux-only fallback."""
+    """``/sdcard/TwinPane/bridge`` when shared storage is mounted.
+
+    The fallback inside the Termux home exists only so the worker can still run
+    for local testing - but the app can never see that folder, so using it
+    silently is how a whole session gets wasted on "nothing happens". It is
+    returned, and :func:`serve` refuses to pretend it is working.
+    """
     candidates = [
         "/sdcard/" + BRIDGE_DIRNAME,
         os.path.expanduser("~/storage/shared/" + BRIDGE_DIRNAME),
-        os.path.expanduser("~/TwinPane/bridge"),
     ]
     for candidate in candidates:
         parent = os.path.dirname(os.path.dirname(candidate))
         if os.path.isdir(parent):
             return candidate
-    # Nothing is mounted: keep it inside the Termux home so the worker still runs.
     return os.path.expanduser("~/TwinPane/bridge")
+
+
+def shared_storage_ready() -> bool:
+    """Can Termux see the phone's storage at all?
+
+    Without this the worker has nowhere to talk to the app. Checking it up
+    front turns a silent, confusing failure into one clear instruction.
+    """
+    for candidate in ("/sdcard", os.path.expanduser("~/storage/shared")):
+        if os.path.isdir(candidate):
+            try:
+                if os.listdir(candidate):
+                    return True
+            except OSError:
+                continue
+    return False
 
 
 class Bridge:
@@ -398,12 +418,31 @@ def serve(interval: float = 0.6, verbose: bool = True,
     """
     bridge = Bridge(bridge_dir)
     bridge.ensure()
+    ready = shared_storage_ready()
     if verbose:
         print("Twin-Pane bridge")
-        print("  folder : %s" % bridge.root)
+        print("  folder        : %s" % bridge.root)
         print("  terminal home : %s" % os.path.expanduser("~"))
-        print("  phone storage : %s" % (shared_root() or "not mounted"))
-        print("  waiting for requests… (Ctrl-C to stop)")
+        print("  phone storage : %s" % (shared_root() or "NOT MOUNTED"))
+        print()
+    if not ready:
+        # The most common real failure by far: termux-setup-storage was never
+        # run, so /sdcard does not exist and the app has nowhere to talk. Say
+        # it loudly and stop, instead of appearing to work in a private folder.
+        message = (
+            "Twin-Pane bridge: the phone's storage is not visible from Termux.\n"
+            "\n"
+            "  Fix it with one command:\n"
+            "\n"
+            "      termux-setup-storage\n"
+            "\n"
+            "  Android will ask for permission - tap Allow - then run this again.\n"
+            "  Without it the app cannot see the worker, and no file can move.\n")
+        print(message)
+        return 2
+    if verbose:
+        print("  waiting for requests... (Ctrl-C to stop)")
+        print()
     started = time.monotonic()
     interval = max(0.2, float(interval))
     try:

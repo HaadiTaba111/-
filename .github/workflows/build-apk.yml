@@ -155,17 +155,17 @@ jobs:
           $SDK/zipalign -f 4 "$APK" /tmp/aligned.apk
           $SDK/apksigner sign --ks /tmp/release.keystore \
             --ks-key-alias "$KEY_ALIAS" --ks-pass "pass:$KEY_PASS" \
-            --out dist/twinpane-1.4.0.apk /tmp/aligned.apk
-          $SDK/apksigner verify --print-certs dist/twinpane-1.4.0.apk
+            --out dist/twinpane-1.4.1.apk /tmp/aligned.apk
+          $SDK/apksigner verify --print-certs dist/twinpane-1.4.1.apk
 
       - name: Collect artefacts
         run: |
           mkdir -p dist
           cp android/app/build/outputs/apk/debug/app-debug.apk \
-             dist/twinpane-1.4.0-debug.apk
+             dist/twinpane-1.4.1-debug.apk
           if [ -f android/app/build/outputs/apk/release/app-release.apk ]; then
             cp android/app/build/outputs/apk/release/app-release.apk \
-               dist/twinpane-1.4.0.apk
+               dist/twinpane-1.4.1.apk
           fi
           ls -lh dist/*.apk
           sha256sum dist/*.apk > dist/APK-SHA256SUMS || true

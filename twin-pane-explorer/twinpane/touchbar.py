@@ -66,7 +66,7 @@ class Button:
 KEY_ACTIONS: List[Tuple[str, str]] = [
     ("help", "Help"),
     ("refresh", "Rfr"),
-    ("view", "View"),
+    ("sort", "Sort"),
     ("copy", "Copy"),
     ("move", "Move"),
     ("mkdir", "Dir"),
@@ -87,18 +87,9 @@ def layout_keys(width: int, project_running: bool = False) -> List[Button]:
     actions = list(KEY_ACTIONS)
     width = max(1, width)
 
-    # Try one row first.
-    if width >= len(actions) * 5:
-        cell = width // len(actions)
-        buttons = []
-        x = 0
-        for index, (action, label) in enumerate(actions):
-            last = index == len(actions) - 1
-            span = (width - x) if last else cell
-            buttons.append(Button(action, _decorate(action, label, project_running),
-                                  x, span))
-            x += span
-        return buttons
+    # One row only when the screen is wide enough for ten comfortable cells.
+    if width >= TWO_ROW_WIDTH:
+        return _one_row(actions, width, project_running)
 
     # Two rows, split roughly in half.
     per_row = max(3, len(actions) // 2 + (len(actions) % 2))
@@ -107,16 +98,30 @@ def layout_keys(width: int, project_running: bool = False) -> List[Button]:
     for row_index, row_actions in enumerate(rows):
         if not row_actions:
             continue
-        cell = width // len(row_actions)
-        x = 0
-        for index, (action, label) in enumerate(row_actions):
-            last = index == len(row_actions) - 1
-            span = (width - x) if last else cell
-            if span < 4:
-                continue                        # untappable: leave it out
-            buttons.append(Button(action, _decorate(action, label, project_running),
-                                  x, span, row=row_index))
-            x += span
+        for button in _one_row(row_actions, width, project_running, row=row_index):
+            if button.width >= 4:               # narrower than that is a mis-tap
+                buttons.append(button)
+    return buttons
+
+
+def _one_row(actions, width: int, project_running: bool, row: int = 0) -> List[Button]:
+    """Spread *actions* evenly across one full-width bar row.
+
+    The leftover columns are handed out one at a time to the leftmost cells, so
+    the row always ends exactly at *width* - no hole on the right, no button
+    that silently falls off the bar.
+    """
+    labels = [_decorate(action, label, project_running) for action, label in actions]
+    count = max(1, len(labels))
+    base, extra = divmod(width, count)
+    buttons = []
+    x = 0
+    for index, (action, _label) in enumerate(actions):
+        span = base + (1 if index < extra else 0)
+        if span < 1:
+            break
+        buttons.append(Button(action, labels[index], x, span, row=row))
+        x += span
     return buttons
 
 

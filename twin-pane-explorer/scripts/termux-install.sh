@@ -66,18 +66,44 @@ install_deps() {
     ok "git $(git --version | awk '{print $3}')"
 }
 
+storage_ok() {
+    [ -d "$HOME/storage/shared" ] || [ -d /sdcard/Download ]
+}
+
 storage_access() {
-    if [ -d "$HOME/storage/shared" ] || [ -d /sdcard/Download ]; then
+    if storage_ok; then
         ok "دسترسی به حافظه‌ی گوشی برقرار است"
-        return
+        return 0
     fi
-    say "دسترسی به حافظه‌ی گوشی"
-    if command -v termux-setup-storage >/dev/null 2>&1; then
-        warn "اندروید یک پنجره نشان می‌دهد - Allow را بزن"
-        termux-setup-storage || warn "رد شد. بعداً می‌توانی دوباره اجرا کنی."
-    else
-        warn "termux-setup-storage نیست (pkg install termux-tools)"
+
+    say "دسترسی به حافظه‌ی گوشی (لازم است)"
+    if ! command -v termux-setup-storage >/dev/null 2>&1; then
+        warn "termux-setup-storage نیست"
+        return 1
     fi
+    warn "اندروید یک پنجره نشان می‌دهد - Allow را بزن"
+    termux-setup-storage >/dev/null 2>&1 || true
+
+    # The dialog is asynchronous: give Android a moment to write the symlinks.
+    attempt=0
+    while [ $attempt -lt 20 ]; do
+        storage_ok && { ok "دسترسی برقرار شد"; return 0; }
+        sleep 0.5
+        attempt=$((attempt + 1))
+    done
+
+    printf '\n'
+    printf '\033[1;31m  ✗ اجازه‌ی حافظه داده نشد\033[0m\n'
+    printf '\n'
+    printf '  بدون این اجازه، برنامه نمی‌تواند فایل‌های گوشی را ببیند و\n'
+    printf '  worker ترمکس هیچ راهی برای حرف‌زدن با اپ ندارد.\n'
+    printf '\n'
+    printf '  یک بار این را بزن، در پنجره‌ی اندروید Allow را انتخاب کن،\n'
+    printf '  بعد همین نصب‌کننده را دوباره اجرا کن:\n'
+    printf '\n'
+    printf '      termux-setup-storage\n'
+    printf '\n'
+    return 1
 }
 
 fetch_source() {
@@ -229,12 +255,19 @@ case "${1:-}" in
     --uninstall) uninstall; exit 0 ;;
     --doctor)   doctor; exit 0 ;;
     --run)      shift; command -v twinpane >/dev/null || die "اول نصب کن: bash $0 --install"; run_app "$@" ;;
-    --install)  install_deps; storage_access; install_app; selftest
+    --install)  install_deps
+                if ! storage_access; then
+                    die "نصب متوقف شد - اول termux-setup-storage را اجرا کن"
+                fi
+                install_app; selftest
                 echo; ok "تمام. اجرا با: twinpane" ;;
     --update)   install_deps; fetch_source; install_app; selftest; shift || true; run_app ;;
     *)
         install_deps
-        storage_access
+        if ! storage_access; then
+            printf '\n  اگر می‌خواهی بدون دسترسی حافظه ادامه بدهم: bash %s --install --no-storage\n\n' "$0"
+            die "نصب متوقف شد - اول termux-setup-storage را اجرا کن"
+        fi
         install_app
         selftest
         echo
